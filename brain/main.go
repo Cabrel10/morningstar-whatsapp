@@ -172,10 +172,18 @@ func handleWebhook(c echo.Context) error {
 	}
 
 	if shouldRespond {
+		jobType := "text"
+		if m.AudioMessage != nil {
+			jobType = "audio"
+		} else if m.ImageMessage != nil {
+			jobType = "image"
+		}
+		
 		jobQueue <- Job{
 			Instance:  instance,
 			RemoteJid: remoteJid,
 			UserText:  text,
+			Type:      jobType,
 		}
 	}
 
@@ -185,12 +193,15 @@ func handleWebhook(c echo.Context) error {
 func processResponse(instance, remoteJid, userText string) {
 	fmt.Printf("[%s] Processing response for %s...\n", instance, remoteJid)
 	
-	// 1. Get history
-	history, err := getRecentMessages(remoteJid, 15)
-	if err != nil {
-		fmt.Printf("Error getting history: %v\n", err)
+	// 1. Semantic Search (RAG)
+	embedding, _ := generateEmbedding(userText)
+	semanticMemory := ""
+	if embedding != nil {
+		semanticMemory, _ = searchSemanticMemory(remoteJid, embedding, 5)
 	}
-	
+
+	// 2. Get history
+	history, _ := getRecentMessages(remoteJid, 15)
 	var historyLines []string
 	for _, line := range history {
 		if len(line) > 500 {
@@ -200,41 +211,55 @@ func processResponse(instance, remoteJid, userText string) {
 	}
 	historyStr := strings.Join(historyLines, "\n")
 
-	// 2. Get facts and media context
+	// 3. Get facts and media context
 	facts, _ := getFacts(remoteJid)
 	factsStr := strings.Join(facts, "\n")
-	if factsStr == "" {
-		factsStr = "Aucun fait ou média récent mémorisé."
-	}
 
-	// 2b. Get Group Cartography
+	// 4. Get Group Cartography
 	cartography, _ := getGroupCartography(remoteJid)
 
-	// 3. Prepare prompt
-	prompt := fmt.Sprintf(PersonaPrompt, cartography, factsStr, historyStr)
+	// 5. Build Augmented Prompt
+	ragContext := ""
+	if semanticMemory != "" {
+		ragContext = "\nSouvenirs lointains pertinents :\n" + semanticMemory
+	}
 	
-	// 4. Send typing status
+	prompt := fmt.Sprintf(PersonaPrompt, cartography, factsStr, ragContext, historyStr)
+	
+	// 6. Send typing status
 	go sendTypingStatus(instance, remoteJid)
 
-	// 5. Call Ollama
+	// 7. Call Ollama
 	response, err := callOllama(prompt, nil)
 	if err != nil {
 		fmt.Printf("Error calling Ollama: %v\n", err)
 		return
 	}
 
-	// 6. Send message
-	_ = sendWhatsAppMessage(instance, remoteJid, response)
+	// 8. Decide response format: Voice or Text
+	if strings.Contains(strings.ToLower(userText), "vocal") || strings.HasPrefix(userText, "[audio]") {
+		audioBase64, err := generateTTS(response)
+		if err == nil {
+			_ = sendWhatsAppAudio(instance, remoteJid, audioBase64)
+		} else {
+			_ = sendWhatsAppMessage(instance, remoteJid, response)
+		}
+	} else {
+		_ = sendWhatsAppMessage(instance, remoteJid, response)
+	}
 	
-	// 7. Extract new facts
+	// 9. Extract facts AND Save to Semantic Memory
 	go func() {
-		time.Sleep(10 * time.Second) // Let system fully cool down
+		time.Sleep(5 * time.Second)
+		
+		// Fix: Generate embedding for the bot response itself
+		respEmbedding, err := generateEmbedding(response)
+		if err == nil {
+			saveMessageEmbedding(fmt.Sprintf("resp_%d", time.Now().Unix()), remoteJid, response, respEmbedding)
+		}
+		
 		extractAndSaveFacts(remoteJid, historyStr+"\nUser: "+userText+"\nPoulga: "+response)
 	}()
-}
-
-func respond(instance, remoteJid, userText string) {
-	// Replaced by worker
 }
 
 func extractAndSaveFacts(remoteJid, conversation string) {
@@ -257,17 +282,19 @@ func extractAndSaveFacts(remoteJid, conversation string) {
 			if len(parts) >= 2 {
 				name := strings.TrimSpace(parts[0])
 				info := strings.TrimSpace(parts[1])
-				fmt.Printf("Updating profile for %s in %s: %s\n", name, remoteJid, info)
-				updateMemberProfile(remoteJid, name, info, info) // Using same info for both for now
+				updateMemberProfile(remoteJid, name, info, info)
 			}
 		} else if strings.HasPrefix(line, "FACT:") {
 			fact := strings.TrimSpace(strings.TrimPrefix(line, "FACT:"))
-			fmt.Printf("Saving new fact for %s: %s\n", remoteJid, fact)
 			addFact(remoteJid, fact)
+		} else if strings.HasPrefix(line, "TOPIC:") {
+			parts := strings.Split(strings.TrimPrefix(line, "TOPIC:"), "|")
+			if len(parts) >= 2 {
+				topicName := strings.TrimSpace(parts[0])
+				topicDesc := strings.TrimSpace(parts[1])
+				upsertTopic(topicName, topicDesc)
+			}
 		} else {
-			// Fallback for old style or unformatted lines
-			line = strings.TrimPrefix(line, "- ")
-			line = strings.TrimPrefix(line, "* ")
 			addFact(remoteJid, line)
 		}
 	}

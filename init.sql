@@ -1,6 +1,9 @@
 -- MorningStar Brain - Database initialization
 -- Creates the facts table for conversation memory
 
+-- Enable pgvector extension
+CREATE EXTENSION IF NOT EXISTS vector;
+
 CREATE TABLE IF NOT EXISTS facts (
     id SERIAL PRIMARY KEY,
     remote_jid VARCHAR(255) NOT NULL,
@@ -43,7 +46,16 @@ CREATE TABLE IF NOT EXISTS member_interactions (
     UNIQUE(group_jid, source_jid, target_jid, interaction_type)
 );
 
--- Sticker usage for social profiling
+-- Sticker usage and semantic library
+CREATE TABLE IF NOT EXISTS sticker_library (
+    id SERIAL PRIMARY KEY,
+    file_sha256 VARCHAR(255) UNIQUE NOT NULL,
+    description TEXT,
+    tags TEXT,
+    image_path TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS member_sticker_usage (
     id SERIAL PRIMARY KEY,
     jid VARCHAR(255) NOT NULL,
@@ -61,9 +73,38 @@ CREATE TABLE IF NOT EXISTS media_metadata (
     media_type VARCHAR(50), -- 'image', 'pdf', 'audio'
     description TEXT,
     summary TEXT,
+    file_path TEXT, -- Local path on SSD
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(message_id)
 );
+
+-- Thematic tracking: Topics
+CREATE TABLE IF NOT EXISTS topics (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) UNIQUE NOT NULL,
+    description TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS message_topics (
+    id SERIAL PRIMARY KEY,
+    message_id VARCHAR(255) NOT NULL,
+    topic_id INTEGER REFERENCES topics(id),
+    relevance_score FLOAT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Vector Memory: Embeddings for RAG
+CREATE TABLE IF NOT EXISTS message_embeddings (
+    id SERIAL PRIMARY KEY,
+    message_id VARCHAR(255) NOT NULL,
+    remote_jid VARCHAR(255) NOT NULL,
+    content TEXT NOT NULL,
+    embedding vector(768), -- Dimensions for nomic-embed-text or similar
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_embeddings_remote_jid ON message_embeddings(remote_jid);
 
 -- Conversation summaries for long-term memory
 CREATE TABLE IF NOT EXISTS conversation_summaries (

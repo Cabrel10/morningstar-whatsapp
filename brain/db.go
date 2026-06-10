@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -113,13 +114,53 @@ func recordStickerUsage(jid, sha256 string) error {
 	return err
 }
 
-func recordMediaMetadata(remoteJid, messageId, mType, desc string) error {
+func searchSemanticMemory(remoteJid string, queryEmbedding []float32, limit int) (string, error) {
+	// Simple cosine similarity search using pgvector
+	rows, err := db.Query(context.Background(),
+		`SELECT content, created_at 
+		 FROM message_embeddings 
+		 WHERE remote_jid = $1 
+		 ORDER BY embedding <=> $2 LIMIT $3`,
+		 remoteJid, queryEmbedding, limit)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	var results []string
+	for rows.Next() {
+		var content string
+		var createdAt time.Time
+		if err := rows.Scan(&content, &createdAt); err == nil {
+			results = append(results, fmt.Sprintf("[%s] %s", createdAt.Format("02/01/2006"), content))
+		}
+	}
+	return strings.Join(results, "\n"), nil
+}
+
+func saveMessageEmbedding(messageId, remoteJid, content string, embedding []float32) error {
 	_, err := db.Exec(context.Background(),
-		`INSERT INTO media_metadata (remote_jid, message_id, media_type, description)
-		 VALUES ($1, $2, $3, $4)
-		 ON CONFLICT (message_id) DO UPDATE SET
-		 description = EXCLUDED.description`,
-		 remoteJid, messageId, mType, desc)
+		`INSERT INTO message_embeddings (message_id, remote_jid, content, embedding)
+		 VALUES ($1, $2, $3, $4)`,
+		 messageId, remoteJid, content, embedding)
+	return err
+}
+
+func upsertTopic(name, description string) (int, error) {
+	var id int
+	err := db.QueryRow(context.Background(),
+		`INSERT INTO topics (name, description) VALUES ($1, $2)
+		 ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description
+		 RETURNING id`,
+		 name, description).Scan(&id)
+	return id, err
+}
+
+func linkMessageToTopic(messageId string, topicId int, score float64) error {
+	_, err := db.Exec(context.Background(),
+		`INSERT INTO message_topics (message_id, topic_id, relevance_score)
+		 VALUES ($1, $2, $3)`,
+		 messageId, topicId, score)
 	return err
 }
 

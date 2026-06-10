@@ -43,3 +43,30 @@ func callOllama(prompt string, images []string) (string, error) {
 
 	return result.Response, nil
 }
+
+func generateEmbedding(text string) ([]float32, error) {
+	ollamaURL := os.Getenv("OLLAMA_URL")
+	if ollamaURL == "" {
+		ollamaURL = "http://localhost:11434"
+	}
+
+	client := resty.New()
+	var result EmbeddingResponse
+	resp, err := client.R().
+		SetBody(EmbeddingRequest{
+			Model:  "nomic-embed-text",
+			Prompt: text,
+		}).
+		SetResult(&result).
+		Post(fmt.Sprintf("%s/api/embeddings", ollamaURL))
+
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.IsError() {
+		return nil, fmt.Errorf("ollama embedding error: %s", resp.String())
+	}
+
+	return result.Embedding, nil
+}

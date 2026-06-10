@@ -29,6 +29,22 @@ type Job struct {
 	RemoteJid string
 	UserText  string
 	Image     string // Base64 image data
+	Type      string // 'text', 'image', 'audio'
+}
+
+type EmbeddingRequest struct {
+	Model  string `json:"model"`
+	Prompt string `json:"prompt"`
+}
+
+type EmbeddingResponse struct {
+	Embedding []float32 `json:"embedding"`
+}
+
+type TTSRequest struct {
+	Model string `json:"model"`
+	Input string `json:"input"`
+	Voice string `json:"voice"`
 }
 
 type MessageContent struct {
@@ -37,6 +53,19 @@ type MessageContent struct {
 	ImageMessage *ImageMessage        `json:"imageMessage"`
 	StickerMessage *StickerMessage    `json:"stickerMessage"`
 	ReactionMessage *ReactionMessage  `json:"reactionMessage"`
+	AudioMessage   *AudioMessage      `json:"audioMessage"`
+}
+
+type AudioMessage struct {
+	Url      string `json:"url"`
+	Mimetype string `json:"mimetype"`
+	Seconds  int    `json:"seconds"`
+}
+
+type EvolutionSendAudioRequest struct {
+	Number string `json:"number"`
+	Audio  string `json:"audio"` // Base64 or URL
+	Delay  int    `json:"delay"`
 }
 
 type ExtendedTextMessage struct {

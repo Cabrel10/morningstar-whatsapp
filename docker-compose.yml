@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg15 # Reverted to pg15 to match existing data directory
     restart: always
     environment:
       POSTGRES_USER: whatsapp
@@ -86,6 +86,8 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file: .env
+    volumes:
+      - ./media:/app/media # Mounted for media archiving
     depends_on:
       db:
         condition: service_healthy
