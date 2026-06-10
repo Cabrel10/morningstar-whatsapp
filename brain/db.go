@@ -84,6 +84,17 @@ func upsertMember(jid, groupJid, pushName string) error {
 	return err
 }
 
+func updateMemberProfile(groupJid, pushName, skill, interest string) error {
+	// Simple append of skills/interests to existing ones
+	_, err := db.Exec(context.Background(), 
+		`UPDATE group_members SET 
+		 skills = CASE WHEN skills IS NULL THEN $3 ELSE skills || ', ' || $3 END,
+		 interests = CASE WHEN interests IS NULL THEN $4 ELSE interests || ', ' || $4 END
+		 WHERE group_jid = $1 AND push_name = $2`, 
+		 groupJid, pushName, skill, interest)
+	return err
+}
+
 func getMemberProfiles(groupJid string) (string, error) {
 	rows, err := db.Query(context.Background(), 
 		`SELECT push_name, skills, interests, message_count 
@@ -115,6 +126,13 @@ func getMemberProfiles(groupJid string) (string, error) {
 func getGroupCartography(remoteJid string) (string, error) {
 	// Faster pre-aggregated cartography
 	return getMemberProfiles(remoteJid)
+}
+
+func cleanupOldMessages(days int) error {
+	_, err := db.Exec(context.Background(), 
+		`DELETE FROM public."Message" 
+		 WHERE "messageTimestamp" < extract(epoch from (now() - interval '`+fmt.Sprintf("%d", days)+` days'))`)
+	return err
 }
 
 func addFact(remoteJid, content string) error {

@@ -12,6 +12,10 @@ import (
 	"github.com/labstack/echo/v4/middleware"
 )
 
+var (
+	jobQueue = make(chan Job, 100) // Queue for Ollama requests
+)
+
 func main() {
 	// Retry initialization
 	for {
@@ -34,6 +38,12 @@ func main() {
 		time.Sleep(2 * time.Second)
 	}
 
+	// Start Ollama Worker
+	go ollamaWorker()
+
+	// Daily Cleanup Task
+	go runDailyCleanup()
+
 	e := echo.New()
 
 	e.Use(middleware.Logger())
@@ -52,6 +62,21 @@ func main() {
 	}
 
 	e.Logger.Fatal(e.Start(":" + port))
+}
+
+func ollamaWorker() {
+	fmt.Println("Ollama Worker started...")
+	for job := range jobQueue {
+		processResponse(job.Instance, job.RemoteJid, job.UserText)
+	}
+}
+
+func runDailyCleanup() {
+	for {
+		time.Sleep(24 * time.Hour)
+		fmt.Println("Running daily database cleanup...")
+		cleanupOldMessages(30) // Delete messages older than 30 days
+	}
 }
 
 func handleWeeklySummary(c echo.Context) error {
@@ -100,10 +125,16 @@ func handleWebhook(c echo.Context) error {
 	text := GetMessageText(data.Message)
 	remoteJid := data.Key.RemoteJid
 	
-	// Update member profile
-	go upsertMember(data.Key.Id, remoteJid, data.PushName)
+	// FIX: Use Participant for groups, RemoteJid for private chats
+	senderJid := data.Key.Participant
+	if senderJid == "" {
+		senderJid = remoteJid
+	}
 	
-	fmt.Printf("[%s] Received message from %s: %s\n", instance, data.PushName, text)
+	// Update member profile
+	go upsertMember(senderJid, remoteJid, data.PushName)
+	
+	fmt.Printf("[%s] Received message from %s (%s): %s\n", instance, data.PushName, senderJid, text)
 
 	// Update last message time in Redis
 	rdb.Set(context.Background(), "last_msg:"+remoteJid, time.Now().Unix(), 0)
@@ -114,21 +145,33 @@ func handleWebhook(c echo.Context) error {
 	}
 
 	if shouldRespond {
-		go respond(instance, remoteJid, text)
+		jobQueue <- Job{
+			Instance:  instance,
+			RemoteJid: remoteJid,
+			UserText:  text,
+		}
 	}
 
 	return c.NoContent(http.StatusOK)
 }
 
-func respond(instance, remoteJid, userText string) {
-	fmt.Printf("[%s] Responding to %s...\n", instance, remoteJid)
+func processResponse(instance, remoteJid, userText string) {
+	fmt.Printf("[%s] Processing response for %s...\n", instance, remoteJid)
 	
-	// 1. Get history (Reduced to 15 for better balance)
+	// 1. Get history (15 messages, truncated to 500 chars each)
 	history, err := getRecentMessages(remoteJid, 15)
 	if err != nil {
 		fmt.Printf("Error getting history: %v\n", err)
 	}
-	historyStr := strings.Join(history, "\n")
+	
+	var historyLines []string
+	for _, line := range history {
+		if len(line) > 500 {
+			line = line[:500] + "..."
+		}
+		historyLines = append(historyLines, line)
+	}
+	historyStr := strings.Join(historyLines, "\n")
 
 	// 2. Get facts (Limit to last 5 facts to keep prompt small)
 	facts, _ := getFacts(remoteJid)
@@ -166,6 +209,10 @@ func respond(instance, remoteJid, userText string) {
 	}()
 }
 
+func respond(instance, remoteJid, userText string) {
+	// Replaced by worker
+}
+
 func extractAndSaveFacts(remoteJid, conversation string) {
 	prompt := fmt.Sprintf(FactExtractionPrompt, conversation)
 	response, err := callOllama(prompt)
@@ -180,11 +227,24 @@ func extractAndSaveFacts(remoteJid, conversation string) {
 		if line == "" || strings.ToUpper(line) == "NONE" {
 			continue
 		}
-		// Basic cleaning of bullet points
-		line = strings.TrimPrefix(line, "- ")
-		line = strings.TrimPrefix(line, "* ")
-		
-		fmt.Printf("Saving new fact for %s: %s\n", remoteJid, line)
-		addFact(remoteJid, line)
+
+		if strings.HasPrefix(line, "PROFILE:") {
+			parts := strings.Split(strings.TrimPrefix(line, "PROFILE:"), "|")
+			if len(parts) >= 2 {
+				name := strings.TrimSpace(parts[0])
+				info := strings.TrimSpace(parts[1])
+				fmt.Printf("Updating profile for %s in %s: %s\n", name, remoteJid, info)
+				updateMemberProfile(remoteJid, name, info, info) // Using same info for both for now
+			}
+		} else if strings.HasPrefix(line, "FACT:") {
+			fact := strings.TrimSpace(strings.TrimPrefix(line, "FACT:"))
+			fmt.Printf("Saving new fact for %s: %s\n", remoteJid, fact)
+			addFact(remoteJid, fact)
+		} else {
+			// Fallback for old style or unformatted lines
+			line = strings.TrimPrefix(line, "- ")
+			line = strings.TrimPrefix(line, "* ")
+			addFact(remoteJid, line)
+		}
 	}
 }

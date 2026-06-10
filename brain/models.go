@@ -18,9 +18,16 @@ type MessageData struct {
 }
 
 type MessageKey struct {
-	RemoteJid string `json:"remoteJid"`
-	FromMe    bool   `json:"fromMe"`
-	Id        string `json:"id"`
+	RemoteJid   string `json:"remoteJid"`
+	FromMe      bool   `json:"fromMe"`
+	Id          string `json:"id"`
+	Participant string `json:"participant"` // Real sender ID in groups
+}
+
+type Job struct {
+	Instance  string
+	RemoteJid string
+	UserText  string
 }
 
 type MessageContent struct {

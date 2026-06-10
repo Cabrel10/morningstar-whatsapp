@@ -18,8 +18,14 @@ Contexte récent de la discussion :
 
 Réponds de manière pertinente en utilisant ta mémoire du groupe. Reste concise si possible, mais sois exhaustive si le sujet le demande.`
 
-const FactExtractionPrompt = `Analyse les messages suivants et extrais les faits importants à mémoriser sur les participants ou le projet.
-Réponds uniquement par une liste de faits courts, un par ligne. Si aucun fait important n'est présent, réponds "NONE".
+const FactExtractionPrompt = `Analyse les messages suivants pour extraire deux types d'informations :
+1. Faits importants sur le projet ou les décisions du groupe.
+2. Compétences ou centres d'intérêt détectés chez les participants (ex: "Jean s'y connaît en Docker", "Alice s'intéresse au trading").
+
+Réponds uniquement sous forme de liste, une information par ligne.
+Si c'est une compétence ou un intérêt, commence la ligne par "PROFILE: [Nom] | [Compétence/Intérêt]".
+Si c'est un fait général, commence la ligne par "FACT: [Le fait]".
+Si rien n'est pertinent, réponds "NONE".
 
 Messages:
 %s`
