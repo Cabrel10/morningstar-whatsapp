@@ -29,7 +29,7 @@ services:
       retries: 5
 
   evolution-api:
-    image: evoapicloud/evolution-api:latest
+    image: evoapicloud/evolution-api:v2.3.7
     restart: always
     ports:
       - "8081:8080"
@@ -43,6 +43,11 @@ services:
         condition: service_healthy
     volumes:
       - evolution_instances:/evolution/instances
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   n8n:
     image: n8nio/n8n:latest
@@ -66,11 +71,16 @@ services:
         condition: service_healthy
     volumes:
       - n8n_data:/home/node/.n8n
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5678/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
   brain:
     build:
       context: ./brain
-    restart: always
+    restart: unless-stopped
     ports:
       - "3001:3000"
     extra_hosts:
@@ -81,6 +91,11 @@ services:
         condition: service_healthy
       evolution-api:
         condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
 volumes:
   postgres_data:

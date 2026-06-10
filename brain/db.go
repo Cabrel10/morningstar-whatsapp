@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -69,6 +70,51 @@ func getFacts(remoteJid string) ([]string, error) {
 		facts = append(facts, content)
 	}
 	return facts, nil
+}
+
+func upsertMember(jid, groupJid, pushName string) error {
+	_, err := db.Exec(context.Background(), 
+		`INSERT INTO group_members (jid, group_jid, push_name, message_count, last_seen) 
+		 VALUES ($1, $2, $3, 1, CURRENT_TIMESTAMP)
+		 ON CONFLICT (jid, group_jid) DO UPDATE SET 
+		 push_name = EXCLUDED.push_name,
+		 message_count = group_members.message_count + 1,
+		 last_seen = CURRENT_TIMESTAMP`, 
+		 jid, groupJid, pushName)
+	return err
+}
+
+func getMemberProfiles(groupJid string) (string, error) {
+	rows, err := db.Query(context.Background(), 
+		`SELECT push_name, skills, interests, message_count 
+		 FROM group_members 
+		 WHERE group_jid = $1 
+		 ORDER BY message_count DESC LIMIT 10`, 
+		 groupJid)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	var profiles []string
+	for rows.Next() {
+		var name, skills, interests string
+		var count int
+		var s, i *string
+		if err := rows.Scan(&name, &s, &i, &count); err != nil {
+			continue
+		}
+		if s != nil { skills = *s } else { skills = "Non identifiées" }
+		if i != nil { interests = *i } else { interests = "Non identifiés" }
+		
+		profiles = append(profiles, fmt.Sprintf("- %s (%d msgs) | Compétences: %s | Intérêts: %s", name, count, skills, interests))
+	}
+	return strings.Join(profiles, "\n"), nil
+}
+
+func getGroupCartography(remoteJid string) (string, error) {
+	// Faster pre-aggregated cartography
+	return getMemberProfiles(remoteJid)
 }
 
 func addFact(remoteJid, content string) error {

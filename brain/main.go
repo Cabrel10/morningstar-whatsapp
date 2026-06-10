@@ -40,10 +40,11 @@ func main() {
 	e.Use(middleware.Recover())
 
 	e.GET("/health", func(c echo.Context) error {
-		return c.String(http.StatusOK, "MorningStar Brain is healthy")
+		return c.String(http.StatusOK, "Poulga Brain is healthy")
 	})
 
 	e.POST("/webhook", handleWebhook)
+	e.GET("/summary/weekly", handleWeeklySummary)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -51,6 +52,29 @@ func main() {
 	}
 
 	e.Logger.Fatal(e.Start(":" + port))
+}
+
+func handleWeeklySummary(c echo.Context) error {
+	remoteJid := c.QueryParam("remoteJid")
+	if remoteJid == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "remoteJid is required"})
+	}
+
+	// 1. Get profiles
+	profiles, _ := getMemberProfiles(remoteJid)
+	
+	// 2. Get recent history for summary
+	history, _ := getRecentMessages(remoteJid, 100) // n8n can handle more context
+	historyStr := strings.Join(history, "\n")
+
+	prompt := fmt.Sprintf("Tu es Poulga. Génère un résumé hebdomadaire bienveillant et intelligent pour ce groupe WhatsApp.\n\nVoici les profils des membres :\n%s\n\nVoici les messages de la semaine :\n%s", profiles, historyStr)
+	
+	response, err := callOllama(prompt)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	return c.JSON(http.StatusOK, map[string]string{"summary": response})
 }
 
 func handleWebhook(c echo.Context) error {
@@ -74,10 +98,13 @@ func handleWebhook(c echo.Context) error {
 	}
 
 	text := GetMessageText(data.Message)
-	fmt.Printf("[%s] Received message from %s: %s\n", instance, data.PushName, text)
-
 	remoteJid := data.Key.RemoteJid
 	
+	// Update member profile
+	go upsertMember(data.Key.Id, remoteJid, data.PushName)
+	
+	fmt.Printf("[%s] Received message from %s: %s\n", instance, data.PushName, text)
+
 	// Update last message time in Redis
 	rdb.Set(context.Background(), "last_msg:"+remoteJid, time.Now().Unix(), 0)
 
@@ -95,48 +122,48 @@ func handleWebhook(c echo.Context) error {
 
 func respond(instance, remoteJid, userText string) {
 	fmt.Printf("[%s] Responding to %s...\n", instance, remoteJid)
-	// 1. Get history
-	history, err := getRecentMessages(remoteJid, 10)
+	
+	// 1. Get history (Reduced to 15 for better balance)
+	history, err := getRecentMessages(remoteJid, 15)
 	if err != nil {
 		fmt.Printf("Error getting history: %v\n", err)
 	}
-	fmt.Printf("Found %d history messages\n", len(history))
 	historyStr := strings.Join(history, "\n")
 
-	// 2. Get facts
-	facts, err := getFacts(remoteJid)
-	if err != nil {
-		fmt.Printf("Error getting facts: %v\n", err)
+	// 2. Get facts (Limit to last 5 facts to keep prompt small)
+	facts, _ := getFacts(remoteJid)
+	if len(facts) > 5 {
+		facts = facts[:5]
 	}
-	fmt.Printf("Found %d facts\n", len(facts))
 	factsStr := strings.Join(facts, "\n")
 	if factsStr == "" {
-		factsStr = "Aucun fait connu."
+		factsStr = "Aucun fait récent."
 	}
 
+	// 2b. Get Group Cartography (Pre-calculated profiles)
+	cartography, _ := getGroupCartography(remoteJid)
+
 	// 3. Prepare prompt
-	prompt := fmt.Sprintf(PersonaPrompt, factsStr, historyStr)
-	fmt.Printf("Calling Ollama for response...\n")
+	prompt := fmt.Sprintf(PersonaPrompt, cartography, factsStr, historyStr)
 	
-	// 4. Call Ollama
+	// 4. Send typing status
+	go sendTypingStatus(instance, remoteJid)
+
+	// 5. Call Ollama
 	response, err := callOllama(prompt)
 	if err != nil {
 		fmt.Printf("Error calling Ollama: %v\n", err)
 		return
 	}
-	fmt.Printf("Ollama response received: %s\n", response)
 
-	// 5. Send message
-	err = sendWhatsAppMessage(instance, remoteJid, response)
-	if err != nil {
-		fmt.Printf("Error sending message: %v\n", err)
-	} else {
-		fmt.Printf("Message sent successfully to %s\n", remoteJid)
-	}
+	// 6. Send message
+	_ = sendWhatsAppMessage(instance, remoteJid, response)
 	
-	// 6. Extract new facts
-	fmt.Printf("Extracting facts...\n")
-	go extractAndSaveFacts(remoteJid, historyStr+"\nUser: "+userText+"\nMorningStar: "+response)
+	// 7. Extract new facts (Deferred to a much later time or separate queue)
+	go func() {
+		time.Sleep(10 * time.Second) // Let system fully cool down
+		extractAndSaveFacts(remoteJid, historyStr+"\nUser: "+userText+"\nPoulga: "+response)
+	}()
 }
 
 func extractAndSaveFacts(remoteJid, conversation string) {

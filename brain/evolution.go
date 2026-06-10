@@ -39,3 +39,24 @@ func sendWhatsAppMessage(instance, remoteJid, text string) error {
 
 	return nil
 }
+
+func sendTypingStatus(instance, remoteJid string) error {
+	evoURL := os.Getenv("EVOLUTION_URL")
+	if evoURL == "" {
+		evoURL = "http://evolution-api:8080"
+	}
+	apiKey := os.Getenv("AUTHENTICATION_API_KEY")
+
+	number := strings.Split(remoteJid, "@")[0]
+
+	client := resty.New()
+	_, err := client.R().
+		SetHeader("apikey", apiKey).
+		SetBody(EvolutionPresenceRequest{
+			Number:   number,
+			Presence: "composing",
+		}).
+		Post(fmt.Sprintf("%s/chat/presenceUpdate/%s", evoURL, instance))
+
+	return err
+}

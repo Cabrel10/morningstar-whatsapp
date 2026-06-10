@@ -18,9 +18,16 @@ func callOllama(prompt string) (string, error) {
 	var result OllamaResponse
 	resp, err := client.R().
 		SetBody(OllamaRequest{
-			Model:  "gemma3:4b",
-			Prompt: prompt,
-			Stream: false,
+			Model:     "gemma3:4b",
+			Prompt:    prompt,
+			Stream:    false,
+			KeepAlive: "-1",
+			Options: map[string]interface{}{
+				"num_thread":     4,
+				"temperature":    0.7,
+				"top_p":          0.9,
+				"repeat_penalty": 1.2,
+			},
 		}).
 		SetResult(&result).
 		Post(fmt.Sprintf("%s/api/generate", ollamaURL))

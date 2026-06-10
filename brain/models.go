@@ -53,9 +53,11 @@ func GetMessageText(raw json.RawMessage) string {
 }
 
 type OllamaRequest struct {
-	Model  string    `json:"model"`
-	Prompt string    `json:"prompt"`
-	Stream bool      `json:"stream"`
+	Model     string                 `json:"model"`
+	Prompt    string                 `json:"prompt"`
+	Stream    bool                   `json:"stream"`
+	KeepAlive string                 `json:"keep_alive"`
+	Options   map[string]interface{} `json:"options"`
 }
 
 type OllamaResponse struct {
@@ -67,6 +69,11 @@ type EvolutionSendMessageRequest struct {
 	Text         string `json:"text"`
 	Delay        int    `json:"delay"`
 	LinkPreview  bool   `json:"linkPreview"`
+}
+
+type EvolutionPresenceRequest struct {
+	Number   string `json:"number"`
+	Presence string `json:"presence"`
 }
 
 type Fact struct {
