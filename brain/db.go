@@ -53,8 +53,9 @@ func getRecentMessages(remoteJid string, limit int) ([]string, error) {
 }
 
 func getFacts(remoteJid string) ([]string, error) {
+	// 1. Get textual facts
 	rows, err := db.Query(context.Background(), 
-		"SELECT content FROM facts WHERE remote_jid = $1 ORDER BY created_at DESC", 
+		"SELECT content FROM facts WHERE remote_jid = $1 ORDER BY created_at DESC LIMIT 5", 
 		remoteJid)
 	if err != nil {
 		return nil, err
@@ -67,9 +68,59 @@ func getFacts(remoteJid string) ([]string, error) {
 		if err := rows.Scan(&content); err != nil {
 			continue
 		}
-		facts = append(facts, content)
+		facts = append(facts, "[Fait] "+content)
 	}
+
+	// 2. Get media context (What was shared recently)
+	mediaRows, err := db.Query(context.Background(),
+		"SELECT media_type, description FROM media_metadata WHERE remote_jid = $1 ORDER BY created_at DESC LIMIT 3",
+		remoteJid)
+	if err == nil {
+		defer mediaRows.Close()
+		for mediaRows.Next() {
+			var mType, desc string
+			if err := mediaRows.Scan(&mType, &desc); err == nil {
+				facts = append(facts, fmt.Sprintf("[Média:%s] %s", mType, desc))
+			}
+		}
+	}
+
 	return facts, nil
+}
+
+func recordInteraction(groupJid, sourceJid, targetJid, iType string) error {
+	if sourceJid == targetJid || targetJid == "" {
+		return nil
+	}
+	_, err := db.Exec(context.Background(),
+		`INSERT INTO member_interactions (group_jid, source_jid, target_jid, interaction_type)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (group_jid, source_jid, target_jid, interaction_type) DO UPDATE SET
+		 weight = member_interactions.weight + 1,
+		 last_interaction = CURRENT_TIMESTAMP`,
+		 groupJid, sourceJid, targetJid, iType)
+	return err
+}
+
+func recordStickerUsage(jid, sha256 string) error {
+	_, err := db.Exec(context.Background(),
+		`INSERT INTO member_sticker_usage (jid, sticker_file_sha256)
+		 VALUES ($1, $2)
+		 ON CONFLICT (jid, sticker_file_sha256) DO UPDATE SET
+		 usage_count = member_sticker_usage.usage_count + 1,
+		 last_used = CURRENT_TIMESTAMP`,
+		 jid, sha256)
+	return err
+}
+
+func recordMediaMetadata(remoteJid, messageId, mType, desc string) error {
+	_, err := db.Exec(context.Background(),
+		`INSERT INTO media_metadata (remote_jid, message_id, media_type, description)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (message_id) DO UPDATE SET
+		 description = EXCLUDED.description`,
+		 remoteJid, messageId, mType, desc)
+	return err
 }
 
 func upsertMember(jid, groupJid, pushName string) error {

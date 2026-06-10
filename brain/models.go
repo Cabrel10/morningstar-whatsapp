@@ -28,15 +28,45 @@ type Job struct {
 	Instance  string
 	RemoteJid string
 	UserText  string
+	Image     string // Base64 image data
 }
 
 type MessageContent struct {
-	Conversation string `json:"conversation"`
+	Conversation string               `json:"conversation"`
 	ExtendedText *ExtendedTextMessage `json:"extendedTextMessage"`
+	ImageMessage *ImageMessage        `json:"imageMessage"`
+	StickerMessage *StickerMessage    `json:"stickerMessage"`
+	ReactionMessage *ReactionMessage  `json:"reactionMessage"`
 }
 
 type ExtendedTextMessage struct {
-	Text string `json:"text"`
+	Text        string       `json:"text"`
+	ContextInfo *ContextInfo `json:"contextInfo"`
+}
+
+type ImageMessage struct {
+	Caption string `json:"caption"`
+	Url     string `json:"url"`
+	Mimetype string `json:"mimetype"`
+}
+
+type StickerMessage struct {
+	Url           string `json:"url"`
+	FileSha256    string `json:"fileSha256"`
+}
+
+type ReactionMessage struct {
+	Key  MessageKey `json:"key"`
+	Text string     `json:"text"`
+}
+
+type ContextInfo struct {
+	QuotedMessage *QuotedMessage `json:"quotedMessage"`
+	Participant   string         `json:"participant"`
+}
+
+type QuotedMessage struct {
+	Conversation string `json:"conversation"`
 }
 
 func GetMessageText(raw json.RawMessage) string {
@@ -48,12 +78,9 @@ func GetMessageText(raw json.RawMessage) string {
 		if m.ExtendedText != nil {
 			return m.ExtendedText.Text
 		}
-	}
-
-	// Fallback to simple string if it's not an object
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return s
+		if m.ImageMessage != nil {
+			return m.ImageMessage.Caption
+		}
 	}
 
 	return ""
@@ -65,6 +92,7 @@ type OllamaRequest struct {
 	Stream    bool                   `json:"stream"`
 	KeepAlive string                 `json:"keep_alive"`
 	Options   map[string]interface{} `json:"options"`
+	Images    []string               `json:"images,omitempty"`
 }
 
 type OllamaResponse struct {

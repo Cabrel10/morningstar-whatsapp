@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -94,7 +95,7 @@ func handleWeeklySummary(c echo.Context) error {
 
 	prompt := fmt.Sprintf("Tu es Poulga. Génère un résumé hebdomadaire bienveillant et intelligent pour ce groupe WhatsApp.\n\nVoici les profils des membres :\n%s\n\nVoici les messages de la semaine :\n%s", profiles, historyStr)
 	
-	response, err := callOllama(prompt)
+	response, err := callOllama(prompt, nil)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
@@ -122,16 +123,42 @@ func handleWebhook(c echo.Context) error {
 		return c.NoContent(http.StatusOK)
 	}
 
-	text := GetMessageText(data.Message)
 	remoteJid := data.Key.RemoteJid
-	
-	// FIX: Use Participant for groups, RemoteJid for private chats
 	senderJid := data.Key.Participant
 	if senderJid == "" {
 		senderJid = remoteJid
 	}
-	
-	// Update member profile
+
+	// 1. Extract content and type
+	var m MessageContent
+	_ = json.Unmarshal(data.Message, &m)
+	text := GetMessageText(data.Message)
+
+	// 2. Handle Social Graph: Citations/Replies
+	if m.ExtendedText != nil && m.ExtendedText.ContextInfo != nil {
+		quotedParticipant := m.ExtendedText.ContextInfo.Participant
+		if quotedParticipant != "" {
+			go recordInteraction(remoteJid, senderJid, quotedParticipant, "reply")
+		}
+	}
+
+	// 3. Handle Reactions
+	if m.ReactionMessage != nil {
+		targetParticipant := m.ReactionMessage.Key.Participant
+		if targetParticipant == "" {
+			targetParticipant = m.ReactionMessage.Key.RemoteJid
+		}
+		go recordInteraction(remoteJid, senderJid, targetParticipant, "reaction")
+		return c.NoContent(http.StatusOK)
+	}
+
+	// 4. Handle Stickers
+	if m.StickerMessage != nil {
+		go recordStickerUsage(senderJid, m.StickerMessage.FileSha256)
+		return c.NoContent(http.StatusOK)
+	}
+
+	// 5. Update member profile
 	go upsertMember(senderJid, remoteJid, data.PushName)
 	
 	fmt.Printf("[%s] Received message from %s (%s): %s\n", instance, data.PushName, senderJid, text)
@@ -158,7 +185,7 @@ func handleWebhook(c echo.Context) error {
 func processResponse(instance, remoteJid, userText string) {
 	fmt.Printf("[%s] Processing response for %s...\n", instance, remoteJid)
 	
-	// 1. Get history (15 messages, truncated to 500 chars each)
+	// 1. Get history
 	history, err := getRecentMessages(remoteJid, 15)
 	if err != nil {
 		fmt.Printf("Error getting history: %v\n", err)
@@ -173,17 +200,14 @@ func processResponse(instance, remoteJid, userText string) {
 	}
 	historyStr := strings.Join(historyLines, "\n")
 
-	// 2. Get facts (Limit to last 5 facts to keep prompt small)
+	// 2. Get facts and media context
 	facts, _ := getFacts(remoteJid)
-	if len(facts) > 5 {
-		facts = facts[:5]
-	}
 	factsStr := strings.Join(facts, "\n")
 	if factsStr == "" {
-		factsStr = "Aucun fait récent."
+		factsStr = "Aucun fait ou média récent mémorisé."
 	}
 
-	// 2b. Get Group Cartography (Pre-calculated profiles)
+	// 2b. Get Group Cartography
 	cartography, _ := getGroupCartography(remoteJid)
 
 	// 3. Prepare prompt
@@ -193,7 +217,7 @@ func processResponse(instance, remoteJid, userText string) {
 	go sendTypingStatus(instance, remoteJid)
 
 	// 5. Call Ollama
-	response, err := callOllama(prompt)
+	response, err := callOllama(prompt, nil)
 	if err != nil {
 		fmt.Printf("Error calling Ollama: %v\n", err)
 		return
@@ -202,7 +226,7 @@ func processResponse(instance, remoteJid, userText string) {
 	// 6. Send message
 	_ = sendWhatsAppMessage(instance, remoteJid, response)
 	
-	// 7. Extract new facts (Deferred to a much later time or separate queue)
+	// 7. Extract new facts
 	go func() {
 		time.Sleep(10 * time.Second) // Let system fully cool down
 		extractAndSaveFacts(remoteJid, historyStr+"\nUser: "+userText+"\nPoulga: "+response)
@@ -215,7 +239,7 @@ func respond(instance, remoteJid, userText string) {
 
 func extractAndSaveFacts(remoteJid, conversation string) {
 	prompt := fmt.Sprintf(FactExtractionPrompt, conversation)
-	response, err := callOllama(prompt)
+	response, err := callOllama(prompt, nil)
 	if err != nil {
 		fmt.Printf("Error extracting facts: %v\n", err)
 		return

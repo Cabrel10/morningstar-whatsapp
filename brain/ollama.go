@@ -7,14 +7,14 @@ import (
 	"github.com/go-resty/resty/v2"
 )
 
-func callOllama(prompt string) (string, error) {
+func callOllama(prompt string, images []string) (string, error) {
 	ollamaURL := os.Getenv("OLLAMA_URL")
 	if ollamaURL == "" {
 		ollamaURL = "http://localhost:11434"
 	}
 
 	client := resty.New()
-	fmt.Printf("Ollama Call: %s/api/generate (Model: gemma3:4b)\n", ollamaURL)
+	fmt.Printf("Ollama Call: %s/api/generate (Model: gemma3:4b, Multimodal: %v)\n", ollamaURL, len(images) > 0)
 	var result OllamaResponse
 	resp, err := client.R().
 		SetBody(OllamaRequest{
@@ -28,6 +28,7 @@ func callOllama(prompt string) (string, error) {
 				"top_p":          0.9,
 				"repeat_penalty": 1.2,
 			},
+			Images: images,
 		}).
 		SetResult(&result).
 		Post(fmt.Sprintf("%s/api/generate", ollamaURL))
