@@ -1,29 +1,31 @@
-# MorningStar WhatsApp Assistant
+# Poulga - Archiviste & Analyste WhatsApp
 
-MorningStar est un assistant intelligent pour WhatsApp conçu pour les groupes professionnels et les interactions structurées. Il combine la puissance de l'IA locale (Ollama), une connectivité robuste (Evolution API), et une automatisation flexible (n8n).
+Poulga est une intelligence artificielle avancée pour WhatsApp, conçue pour agir comme la mémoire vivante et l'analyste d'un groupe. Elle combine la puissance de l'IA locale (Ollama), une connectivité robuste (Evolution API), et une architecture de mémoire structurée pour transformer les conversations en connaissances exploitables.
 
-## 🚀 Fonctionnalités
+## 🚀 Fonctionnalités (v2)
 
-- **Intelligence Contextuelle** : Utilise Gemma 3 (4.3B) via Ollama pour des réponses précises et professionnelles.
-- **Mémoire Long Terme** : Stockage des faits et du contexte dans PostgreSQL pour des conversations cohérentes dans le temps.
-- **Connectivité Stable** : Propulsé par Evolution API (Baileys) pour une intégration transparente avec WhatsApp.
-- **Automation n8n** : Workflow prêt pour l'automatisation de tâches complexes.
-- **Analyse de Sentiment & Extraction de Faits** : Extrait automatiquement les informations importantes des conversations pour enrichir sa base de connaissances.
+- **Identité d'Archiviste** : Poulga n'est pas qu'un chatbot ; elle observe, mémorise et synthétise les échanges du groupe avec un ton naturel et professionnel.
+- **Cartographie Sociale & Profils** : Analyse en temps réel de l'activité des membres, détection des experts et suivi des centres d'intérêt via une base de données structurée.
+- **Performance Optimisée** : 
+  - Modèle **Gemma 3 (4.3B)** maintenu "chaud" en RAM pour des réponses instantanées.
+  - Utilisation multi-cœurs (4 vCPU) pour une inférence rapide.
+  - Découplage des tâches lourdes (extraction de faits) en arrière-plan.
+- **Mémoire Hybride** : Combine l'historique récent (20 messages), les faits marquants persistants et une cartographie d'activité sur 14 jours.
+- **Prêt pour l'Automation** : Endpoint dédié pour générer des résumés hebdomadaires automatiques via **n8n**.
 
 ## 🛠 Architecture
 
-- **Brain (Go)** : Le coeur de l'assistant. Gère les webhooks, la logique métier, et l'orchestration LLM.
-- **Evolution API** : Interface de connexion WhatsApp.
+- **Brain (Go)** : Orchestrateur haute performance. Gère les profils de membres, la logique de mémoire et la communication LLM.
+- **Evolution API (v2.3.7)** : Interface WhatsApp stable et riche en fonctionnalités.
 - **Ollama** : Moteur d'inférence LLM local.
-- **n8n** : Outil d'automatisation de workflows.
-- **PostgreSQL** : Base de données pour les faits et l'historique.
-- **Redis** : Cache pour la gestion d'état en temps réel.
+- **PostgreSQL** : Stockage structuré (Faits, Profils, Cartographie).
+- **n8n** : Automatisation des résumés et tâches planifiées.
 
 ## 📦 Installation
 
 ### Prérequis
 - Docker & Docker Compose
-- Ollama installé localement (ou accessible via réseau)
+- Ollama installé (avec le modèle `gemma3:4b`)
 
 ### Configuration
 1. Clonez le repository :
@@ -35,7 +37,7 @@ MorningStar est un assistant intelligent pour WhatsApp conçu pour les groupes p
 2. Configurez le fichier `.env` :
    ```bash
    cp .env.example .env
-   # Modifiez les variables selon votre environnement
+   # Modifiez les variables (URL Ollama, API Key Evolution, etc.)
    ```
 
 3. Lancez les services :
@@ -43,14 +45,12 @@ MorningStar est un assistant intelligent pour WhatsApp conçu pour les groupes p
    docker compose up -d
    ```
 
-### Connexion WhatsApp
-Accédez à l'interface de gestion :
-`http://votre-ip:8081/manager/`
-Utilisez la clé API configurée dans votre `.env` pour scanner le QR Code.
+### Intégration n8n
+Poulga expose un endpoint pour vos workflows :
+`GET http://brain:3000/summary/weekly?remoteJid=[ID_DU_GROUPE]`
 
 ## 📄 Licence
 
-Ce projet est sous licence **Apache License 2.0**. Cette licence permet une utilisation commerciale, la modification et la distribution, tout en offrant une protection par brevet. Idéal pour bâtir des solutions SaaS ou des services professionnels au-dessus de cette base.
-
+Ce projet est sous licence **Apache License 2.0**.
 ---
 Développé avec ❤️ par [Cabrel10](https://github.com/Cabrel10)
