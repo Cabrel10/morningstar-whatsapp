@@ -14,19 +14,20 @@ func callOllama(prompt string, images []string) (string, error) {
 	}
 
 	client := resty.New()
-	fmt.Printf("Ollama Call: %s/api/generate (Model: gemma3:4b, Multimodal: %v)\n", ollamaURL, len(images) > 0)
+	fmt.Printf("Ollama Call: %s/api/generate (Model: gemma3:4b)\n", ollamaURL)
 	var result OllamaResponse
 	resp, err := client.R().
 		SetBody(OllamaRequest{
 			Model:     "gemma3:4b",
 			Prompt:    prompt,
 			Stream:    false,
-			KeepAlive: "-1",
+			KeepAlive: "24h",
 			Options: map[string]interface{}{
 				"num_thread":     4,
 				"temperature":    0.7,
 				"top_p":          0.9,
 				"repeat_penalty": 1.2,
+				"num_predict":    128, // Augmenté de 80 à 128 pour éviter les coupures
 			},
 			Images: images,
 		}).

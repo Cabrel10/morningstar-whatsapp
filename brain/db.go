@@ -233,3 +233,41 @@ func addFact(remoteJid, content string) error {
 		remoteJid, content)
 	return err
 }
+
+
+// Active Sessions Management
+func createSession(groupJid, userJid, sessionType string, stateJson string) (int, error) {
+	var sessionId int
+	err := db.QueryRow(context.Background(),
+		`INSERT INTO active_sessions (group_jid, user_jid, session_type, state_json)
+		 VALUES ($1, $2, $3, $4)
+		 RETURNING session_id`,
+		groupJid, userJid, sessionType, stateJson).Scan(&sessionId)
+	return sessionId, err
+}
+
+func getActiveSession(groupJid, userJid string) (string, string, error) {
+	var sessionType, stateJson string
+	err := db.QueryRow(context.Background(),
+		`SELECT session_type, state_json FROM active_sessions
+		 WHERE group_jid = $1 AND user_jid = $2
+		 ORDER BY updated_at DESC LIMIT 1`,
+		groupJid, userJid).Scan(&sessionType, &stateJson)
+	return sessionType, stateJson, err
+}
+
+func updateSession(groupJid, userJid, stateJson string) error {
+	_, err := db.Exec(context.Background(),
+		`UPDATE active_sessions SET state_json = $3, updated_at = CURRENT_TIMESTAMP
+		 WHERE group_jid = $1 AND user_jid = $2`,
+		groupJid, userJid, stateJson)
+	return err
+}
+
+func closeSession(groupJid, userJid string) error {
+	_, err := db.Exec(context.Background(),
+		`DELETE FROM active_sessions
+		 WHERE group_jid = $1 AND user_jid = $2`,
+		groupJid, userJid)
+	return err
+}

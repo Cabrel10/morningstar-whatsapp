@@ -118,3 +118,17 @@ CREATE TABLE IF NOT EXISTS conversation_summaries (
 );
 
 CREATE INDEX IF NOT EXISTS idx_summaries_remote_jid ON conversation_summaries(remote_jid);
+
+-- Active Sessions (État conversationnel pour jeux, recherches, etc.)
+CREATE TABLE IF NOT EXISTS active_sessions (
+    session_id SERIAL PRIMARY KEY,
+    group_jid VARCHAR(255) NOT NULL,
+    user_jid VARCHAR(255) NOT NULL,
+    session_type VARCHAR(50) NOT NULL, -- 'game', 'search', 'chat'
+    state_json TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_active_sessions_group ON active_sessions(group_jid);
+CREATE INDEX IF NOT EXISTS idx_active_sessions_user ON active_sessions(user_jid);

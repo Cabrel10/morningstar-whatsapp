@@ -6,9 +6,9 @@ import (
 )
 
 type WebhookPayload struct {
-	Event    string      `json:"event"`
-	Instance string      `json:"instance"`
-	Data     MessageData `json:"data"`
+	Event    string          `json:"event"`
+	Instance string          `json:"instance"`
+	Data     json.RawMessage `json:"data"`
 }
 
 type MessageData struct {

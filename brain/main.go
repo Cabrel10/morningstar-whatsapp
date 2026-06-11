@@ -118,7 +118,18 @@ func handleWebhook(c echo.Context) error {
 		instance = os.Getenv("INSTANCE_NAME")
 	}
 
-	data := payload.Data
+	// Evolution API v2: data can be an object or an array
+	var data MessageData
+	if err := json.Unmarshal(payload.Data, &data); err != nil {
+		// Try unmarshaling as array and taking first element
+		var dataArray []MessageData
+		if err := json.Unmarshal(payload.Data, &dataArray); err == nil && len(dataArray) > 0 {
+			data = dataArray[0]
+		} else {
+			return c.NoContent(http.StatusOK)
+		}
+	}
+
 	if data.Key.FromMe {
 		return c.NoContent(http.StatusOK)
 	}
@@ -166,8 +177,29 @@ func handleWebhook(c echo.Context) error {
 	// Update last message time in Redis
 	rdb.Set(context.Background(), "last_msg:"+remoteJid, time.Now().Unix(), 0)
 
+	// VÉRIFIER LES COMMANDES D'ABORD
+	if cmd, args, isCmd := IsCommand(text); isCmd {
+		go handleCommand(instance, remoteJid, cmd, args)
+		return c.NoContent(http.StatusOK)
+	}
+
+	// LOGIQUE DE DÉCLENCHEMENT (Privé / Mention / Reply)
+	botJid := "237620864894@s.whatsapp.net"
+	
+	isPrivateChat := !strings.HasSuffix(remoteJid, "@g.us")
+	isMentioned := strings.Contains(strings.ToLower(text), "@poulga")
+	isReplyToBot := false
+
+	// Vérifier si on répond à l'un des messages de Poulga
+	if m.ExtendedText != nil && m.ExtendedText.ContextInfo != nil {
+		if m.ExtendedText.ContextInfo.Participant == botJid {
+			isReplyToBot = true
+		}
+	}
+
+	// DÉCISION FINALE : Répondre si privé OU mentionné OU réponse au bot
 	shouldRespond := false
-	if strings.Contains(strings.ToLower(text), "@poulga") {
+	if isPrivateChat || isMentioned || isReplyToBot {
 		shouldRespond = true
 	}
 
@@ -192,110 +224,96 @@ func handleWebhook(c echo.Context) error {
 
 func processResponse(instance, remoteJid, userText string) {
 	fmt.Printf("[%s] Processing response for %s...\n", instance, remoteJid)
-	
-	// 1. Semantic Search (RAG)
-	embedding, _ := generateEmbedding(userText)
-	semanticMemory := ""
-	if embedding != nil {
-		semanticMemory, _ = searchSemanticMemory(remoteJid, embedding, 5)
-	}
+	start := time.Now()
 
-	// 2. Get history
-	history, _ := getRecentMessages(remoteJid, 15)
-	var historyLines []string
-	for _, line := range history {
-		if len(line) > 500 {
-			line = line[:500] + "..."
-		}
-		historyLines = append(historyLines, line)
-	}
-	historyStr := strings.Join(historyLines, "\n")
-
-	// 3. Get facts and media context
-	facts, _ := getFacts(remoteJid)
-	factsStr := strings.Join(facts, "\n")
-
-	// 4. Get Group Cartography
-	cartography, _ := getGroupCartography(remoteJid)
-
-	// 5. Build Augmented Prompt
-	ragContext := ""
-	if semanticMemory != "" {
-		ragContext = "\nSouvenirs lointains pertinents :\n" + semanticMemory
-	}
-	
-	prompt := fmt.Sprintf(PersonaPrompt, cartography, factsStr, ragContext, historyStr)
-	
-	// 6. Send typing status
-	go sendTypingStatus(instance, remoteJid)
-
-	// 7. Call Ollama
-	response, err := callOllama(prompt, nil)
-	if err != nil {
-		fmt.Printf("Error calling Ollama: %v\n", err)
+	// ÉTAPE 1 : Réponse rapide codée (< 5ms)
+	if fastReply, ok := IsFastReply(userText); ok {
+		elapsed := time.Since(start)
+		fmt.Printf("[TIMING] FAST_REPLY: %.0fms\n", elapsed.Seconds()*1000)
+		_ = sendWhatsAppMessage(instance, remoteJid, fastReply)
 		return
 	}
 
-	// 8. Decide response format: Voice or Text
-	if strings.Contains(strings.ToLower(userText), "vocal") || strings.HasPrefix(userText, "[audio]") {
-		audioBase64, err := generateTTS(response)
-		if err == nil {
-			_ = sendWhatsAppAudio(instance, remoteJid, audioBase64)
-		} else {
-			_ = sendWhatsAppMessage(instance, remoteJid, response)
+	// ÉTAPE 2 : Détection d'intention
+	intentStart := time.Now()
+	intent := DetectIntent(userText)
+	intentTime := time.Since(intentStart)
+	fmt.Printf("[TIMING] INTENT: %.1fms (detected: %s)\n", intentTime.Seconds()*1000, intent)
+
+	go sendTypingStatus(instance, remoteJid)
+
+	// ÉTAPE 3 : Routing par intention
+	switch intent {
+	case IntentGame:
+		handleGame(instance, remoteJid, userText, start)
+
+	case IntentSummary:
+		handleSummary(instance, remoteJid, start)
+
+	case IntentSearch:
+		handleSearch(instance, remoteJid, userText, start)
+
+	case IntentGreeting:
+		// Salutations : réponse TRÈS légère sans historique
+		userTextClean := strings.TrimSpace(userText)
+		userTextClean = strings.ReplaceAll(strings.ToLower(userTextClean), "@poulga", "")
+		userTextClean = strings.TrimSpace(userTextClean)
+
+		promptGreeting := fmt.Sprintf(`Tu es Poulga, une amie chaleureuse. Réponds très brièvement et de façon amicale à ce message. Ne te présente pas.
+
+Message de l'utilisateur : %s
+
+Poulga :`, userTextClean)
+
+		ollamaStart := time.Now()
+		response, _ := callOllama(promptGreeting, nil)
+		ollamaTime := time.Since(ollamaStart)
+		fmt.Printf("[TIMING] OLLAMA_GREETING: %.1fms\n", ollamaTime.Seconds()*1000)
+		fmt.Printf("[TIMING] TOTAL: %.1fms\n", time.Since(start).Seconds()*1000)
+
+		response = cleanResponse(response)
+		_ = sendWhatsAppMessage(instance, remoteJid, response)
+
+	default: // IntentChat
+		// Chat normal : contexte minimal
+		pgStart := time.Now()
+		history, _ := getRecentMessages(remoteJid, 5)
+		facts, _ := getFacts(remoteJid)
+		cartography, _ := getGroupCartography(remoteJid)
+		pgTime := time.Since(pgStart)
+		fmt.Printf("[TIMING] DB_CHAT: %.1fms\n", pgTime.Seconds()*1000)
+
+		historyStr := strings.Join(history, "\n")
+		factsStr := strings.Join(facts, "\n")
+		if factsStr == "" {
+			factsStr = "(Aucun fait)"
 		}
-	} else {
+
+		// Vérifier si un persona personnalisé existe
+		customPersona := GetGroupPersona(remoteJid)
+		var prompt string
+		if customPersona != "" {
+			prompt = fmt.Sprintf("%s\n\nHistorique :\n%s\n\nFaits :\n%s\n\nRéponds :", customPersona, historyStr, factsStr)
+		} else {
+			prompt = fmt.Sprintf(PersonaPrompt, cartography, factsStr, historyStr)
+		}
+		fmt.Printf("[DEBUG] PROMPT_START: %.100s...\n", prompt)
+		fmt.Printf("[DEBUG] USER_TEXT: %s\n", userText)
+		
+		ollamaStart := time.Now()
+		response, _ := callOllama(prompt, nil)
+		ollamaTime := time.Since(ollamaStart)
+		fmt.Printf("[TIMING] OLLAMA_CHAT: %.1fms\n", ollamaTime.Seconds()*1000)
+		fmt.Printf("[DEBUG] RESPONSE_START: %.100s...\n", response)
+		fmt.Printf("[TIMING] TOTAL: %.1fms\n", time.Since(start).Seconds()*1000)
+		
+		response = cleanResponse(response)
+		fmt.Printf("[DEBUG] RESPONSE_AFTER_CLEAN: %s\n", response)
 		_ = sendWhatsAppMessage(instance, remoteJid, response)
 	}
-	
-	// 9. Extract facts AND Save to Semantic Memory
-	go func() {
-		time.Sleep(5 * time.Second)
-		
-		// Fix: Generate embedding for the bot response itself
-		respEmbedding, err := generateEmbedding(response)
-		if err == nil {
-			saveMessageEmbedding(fmt.Sprintf("resp_%d", time.Now().Unix()), remoteJid, response, respEmbedding)
-		}
-		
-		extractAndSaveFacts(remoteJid, historyStr+"\nUser: "+userText+"\nPoulga: "+response)
-	}()
 }
 
 func extractAndSaveFacts(remoteJid, conversation string) {
-	prompt := fmt.Sprintf(FactExtractionPrompt, conversation)
-	response, err := callOllama(prompt, nil)
-	if err != nil {
-		fmt.Printf("Error extracting facts: %v\n", err)
-		return
-	}
-
-	lines := strings.Split(response, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.ToUpper(line) == "NONE" {
-			continue
-		}
-
-		if strings.HasPrefix(line, "PROFILE:") {
-			parts := strings.Split(strings.TrimPrefix(line, "PROFILE:"), "|")
-			if len(parts) >= 2 {
-				name := strings.TrimSpace(parts[0])
-				info := strings.TrimSpace(parts[1])
-				updateMemberProfile(remoteJid, name, info, info)
-			}
-		} else if strings.HasPrefix(line, "FACT:") {
-			fact := strings.TrimSpace(strings.TrimPrefix(line, "FACT:"))
-			addFact(remoteJid, fact)
-		} else if strings.HasPrefix(line, "TOPIC:") {
-			parts := strings.Split(strings.TrimPrefix(line, "TOPIC:"), "|")
-			if len(parts) >= 2 {
-				topicName := strings.TrimSpace(parts[0])
-				topicDesc := strings.TrimSpace(parts[1])
-				upsertTopic(topicName, topicDesc)
-			}
-		} else {
-			addFact(remoteJid, line)
-		}
-	}
+	// Désactivée pendant la réponse pour économiser CPU
+	// Activable ultérieurement si ressources disponibles
 }
