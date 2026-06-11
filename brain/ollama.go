@@ -3,18 +3,27 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/go-resty/resty/v2"
 )
 
-func callOllama(prompt string, images []string) (string, error) {
+var (
+	semaphore = make(chan struct{}, 2) // Capacité de 2 slots simultanés
+)
+
+func callOllama(prompt string, images []string, temperature float64) (string, error) {
+	semaphore <- struct{}{}        // On prend une place
+	defer func() { <-semaphore }() // On libère la place
+
 	ollamaURL := os.Getenv("OLLAMA_URL")
 	if ollamaURL == "" {
 		ollamaURL = "http://localhost:11434"
 	}
 
 	client := resty.New()
-	fmt.Printf("Ollama Call: %s/api/generate (Model: gemma3:4b)\n", ollamaURL)
+	client.SetTimeout(60 * time.Second)
+	fmt.Printf("Ollama Call: %s/api/generate (Model: gemma3:4b, Temp: %.1f)\n", ollamaURL, temperature)
 	var result OllamaResponse
 	resp, err := client.R().
 		SetBody(OllamaRequest{
@@ -23,11 +32,14 @@ func callOllama(prompt string, images []string) (string, error) {
 			Stream:    false,
 			KeepAlive: "24h",
 			Options: map[string]interface{}{
-				"num_thread":     4,
-				"temperature":    0.7,
+				"num_thread":     2,   // 2 threads par requête (2*2 = 4 coeurs vCPU)
+				"num_batch":      128, // Optimisation CPU
+				"num_ctx":        2048, // Réduit pour libérer de la RAM et accélérer
+				"numa":           true, // Optimisation accès mémoire
+				"temperature":    0.3, // Réponses focalisées et cohérentes
 				"top_p":          0.9,
-				"repeat_penalty": 1.2,
-				"num_predict":    128, // Augmenté de 80 à 128 pour éviter les coupures
+				"repeat_penalty": 1.2, // Évite les répétitions
+				"num_predict":    128, // Limite la longueur pour forcer la brièveté
 			},
 			Images: images,
 		}).

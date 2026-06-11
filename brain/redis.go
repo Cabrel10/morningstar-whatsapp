@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -37,4 +38,16 @@ func GetGroupPersona(jid string) string {
 		return ""
 	}
 	return val
+}
+
+// IsDuplicateMessage vérifie si le message a déjà été traité (TTL 10 min)
+func IsDuplicateMessage(msgId string) bool {
+	key := "processed:" + msgId
+	val, _ := rdb.Get(context.Background(), key).Result()
+	if val != "" {
+		return true
+	}
+	// On marque comme traité
+	rdb.Set(context.Background(), key, "1", 10*time.Minute)
+	return false
 }

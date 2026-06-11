@@ -25,11 +25,16 @@ type MessageKey struct {
 }
 
 type Job struct {
-	Instance  string
-	RemoteJid string
-	UserText  string
-	Image     string // Base64 image data
-	Type      string // 'text', 'image', 'audio'
+	Instance     string
+	RemoteJid    string
+	UserText     string
+	QuotedText   string
+	QuotedSender string
+	QuotedMsgId  string
+	MsgId        string
+	SenderJid    string
+	Image        string // Base64 image data
+	Type         string // 'text', 'image', 'audio'
 }
 
 type EmbeddingRequest struct {
@@ -51,6 +56,7 @@ type MessageContent struct {
 	Conversation string               `json:"conversation"`
 	ExtendedText *ExtendedTextMessage `json:"extendedTextMessage"`
 	ImageMessage *ImageMessage        `json:"imageMessage"`
+	VideoMessage *VideoMessage        `json:"videoMessage"`
 	StickerMessage *StickerMessage    `json:"stickerMessage"`
 	ReactionMessage *ReactionMessage  `json:"reactionMessage"`
 	AudioMessage   *AudioMessage      `json:"audioMessage"`
@@ -74,9 +80,17 @@ type ExtendedTextMessage struct {
 }
 
 type ImageMessage struct {
-	Caption string `json:"caption"`
-	Url     string `json:"url"`
-	Mimetype string `json:"mimetype"`
+	Caption     string       `json:"caption"`
+	Url         string       `json:"url"`
+	Mimetype    string       `json:"mimetype"`
+	ContextInfo *ContextInfo `json:"contextInfo"`
+}
+
+type VideoMessage struct {
+	Caption     string       `json:"caption"`
+	Url         string       `json:"url"`
+	Mimetype    string       `json:"mimetype"`
+	ContextInfo *ContextInfo `json:"contextInfo"`
 }
 
 type StickerMessage struct {
@@ -92,6 +106,7 @@ type ReactionMessage struct {
 type ContextInfo struct {
 	QuotedMessage *QuotedMessage `json:"quotedMessage"`
 	Participant   string         `json:"participant"`
+	StanzaId      string         `json:"stanzaId"`
 }
 
 type QuotedMessage struct {
@@ -129,15 +144,26 @@ type OllamaResponse struct {
 }
 
 type EvolutionSendMessageRequest struct {
-	Number       string `json:"number"`
-	Text         string `json:"text"`
-	Delay        int    `json:"delay"`
-	LinkPreview  bool   `json:"linkPreview"`
+	Number      string                 `json:"number"`
+	Text        string                 `json:"text"`
+	Delay       int                    `json:"delay"`
+	LinkPreview bool                   `json:"linkPreview"`
+	Quoted      map[string]interface{} `json:"quoted,omitempty"`
+	Mentioned   []string               `json:"mentioned,omitempty"`
 }
 
 type EvolutionPresenceRequest struct {
 	Number   string `json:"number"`
 	Presence string `json:"presence"`
+}
+
+type EvolutionSendMediaRequest struct {
+	Number    string `json:"number"`
+	Media     string `json:"media"` // Base64 or URL
+	FileName  string `json:"fileName"`
+	Caption   string `json:"caption"`
+	MediaType string `json:"mediaType"` // 'image', 'video', 'audio', 'document'
+	Delay     int    `json:"delay"`
 }
 
 type Fact struct {

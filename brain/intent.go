@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 )
 
@@ -111,26 +112,46 @@ func IsShortMessage(text string) bool {
 }
 
 
-// IsCommand détecte si le message est une commande (!help, !stats, etc.)
+// IsCommand détecte les commandes avec ou sans ! ou .
 func IsCommand(text string) (string, string, bool) {
-	text = strings.ToLower(strings.TrimSpace(text))
-	text = strings.ReplaceAll(text, "@poulga", "")
-	text = strings.TrimSpace(text)
-
-	if !strings.HasPrefix(text, "!") {
+	fmt.Printf("[DEBUG] IS_COMMAND_INPUT=%s\n", text)
+	clean := strings.TrimSpace(text)
+	if clean == "" {
 		return "", "", false
 	}
 
-	parts := strings.Fields(text)
-	if len(parts) == 0 {
-		return "", "", false
+	lower := strings.ToLower(clean)
+
+	// Commandes avec préfixes . ou ! (Priorité)
+	if strings.HasPrefix(lower, "!") || strings.HasPrefix(lower, ".") {
+		parts := strings.Fields(clean)
+		if len(parts) == 0 {
+			return "", "", false
+		}
+		// On retire le préfixe de la première partie
+		cmd := strings.ToLower(parts[0][1:])
+		args := ""
+		if len(parts) > 1 {
+			args = strings.TrimSpace(clean[len(parts[0]):])
+		}
+		fmt.Printf("[DEBUG] IS_COMMAND_RESULT=true PREFIXED CMD=%s ARGS=%s\n", cmd, args)
+		return cmd, args, true
 	}
 
-	cmd := strings.TrimPrefix(parts[0], "!")
-	args := ""
-	if len(parts) > 1 {
-		args = strings.Join(parts[1:], " ")
+	// Commandes sans préfixe (help, stats, persona, etc.)
+	commands := []string{"help", "stats", "persona", "confidentialité", "ping", "tagall", "sticker", "menu", "yt", "fb", "tt", "video", "audio"}
+	for _, cmd := range commands {
+		if lower == cmd { // Match exact pour commande sans préfixe
+			fmt.Printf("[DEBUG] IS_COMMAND_RESULT=true EXACT CMD=%s\n", cmd)
+			return cmd, "", true
+		}
+		if strings.HasPrefix(lower, cmd+" ") { // Match avec arguments
+			args := strings.TrimSpace(clean[len(cmd):])
+			fmt.Printf("[DEBUG] IS_COMMAND_RESULT=true BARE CMD=%s ARGS=%s\n", cmd, args)
+			return cmd, args, true
+		}
 	}
 
-	return cmd, args, true
+	fmt.Printf("[DEBUG] IS_COMMAND_RESULT=false\n")
+	return "", "", false
 }
