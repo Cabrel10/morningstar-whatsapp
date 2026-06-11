@@ -103,10 +103,15 @@ func handleWeeklySummary(c echo.Context) error {
 }
 
 func handleWebhook(c echo.Context) error {
+	fmt.Printf("[WEBHOOK] Received request. Event type: %s\n", c.Request().Header.Get("Content-Type"))
+	
 	var payload WebhookPayload
 	if err := c.Bind(&payload); err != nil {
+		fmt.Printf("[WEBHOOK] Bind error: %v\n", err)
 		return err
 	}
+
+	fmt.Printf("[WEBHOOK] Payload event: %s\n", payload.Event)
 
 	instance := payload.Instance
 	if instance == "" {
@@ -171,6 +176,8 @@ func handleWebhook(c echo.Context) error {
 	var m MessageContent
 	_ = json.Unmarshal(data.Message, &m)
 	text := GetMessageText(data.Message)
+
+	fmt.Printf("[WEBHOOK] Message received: text=%q type=%T pushName=%s jid=%s\n", text, m, data.PushName, senderJid)
 
 	quotedText := ""
 	quotedSender := ""
@@ -372,7 +379,7 @@ Poulga :`, userText)
 		}
 		
 		ollamaStart := time.Now()
-		response, _ := callOllama(prompt, nil, 0.7)
+		response, _ := callOllama(prompt, nil, 0.3)
 		ollamaTime := time.Since(ollamaStart)
 		fmt.Printf("[TIMING] OLLAMA_CHAT: %.1fms\n", ollamaTime.Seconds()*1000)
 		
