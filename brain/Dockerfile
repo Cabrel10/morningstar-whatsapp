@@ -13,7 +13,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o morningstar-brain .
 # Run stage
 FROM alpine:latest
 
-WORKDIR /root/
+WORKDIR /app
 
 # Install dependencies for yt-dlp and ffmpeg
 RUN apk add --no-cache \
@@ -25,6 +25,7 @@ RUN apk add --no-cache \
     && chmod a+rx /usr/local/bin/yt-dlp
 
 COPY --from=builder /app/morningstar-brain .
+COPY cookies.txt /app/cookies.txt
 
 EXPOSE 3000
 

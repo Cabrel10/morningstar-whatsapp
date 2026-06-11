@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-resty/resty/v2"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 )
@@ -126,9 +127,10 @@ func handleWebhook(c echo.Context) error {
 			Action       string   `json:"action"`
 		}
 		if err := json.Unmarshal(payload.Data, &groupUpdate); err == nil {
+			settings, _ := getGroupSettings(groupUpdate.Id)
 			for _, p := range groupUpdate.Participants {
-				if groupUpdate.Action == "add" {
-					welcomeMsg := fmt.Sprintf("Bienvenue @%s dans le groupe ! 🎉\nJe suis Poulga, votre associée. Tapez .help pour voir ce que je peux faire.", strings.Split(p, "@")[0])
+				if groupUpdate.Action == "add" && settings.WelcomeEnabled {
+					welcomeMsg := fmt.Sprintf("Bienvenue @%s dans le groupe ! 🎉\nJe suis Poulga, votre associée. Tapez .aide pour voir ce que je peux faire.", strings.Split(p, "@")[0])
 					go sendWhatsAppMessage(instance, groupUpdate.Id, welcomeMsg, "", p)
 				} else if groupUpdate.Action == "remove" {
 					goodbyeMsg := fmt.Sprintf("Au revoir @%s 👋. On espère te revoir bientôt !", strings.Split(p, "@")[0])
@@ -224,6 +226,34 @@ func handleWebhook(c echo.Context) error {
 
 	// 5. Update member profile
 	go upsertMember(senderJid, remoteJid, data.PushName)
+
+	// 6. GESTION DES PARAMÈTRES DE GROUPE (Anti-Lien, etc.)
+	settings, _ := getGroupSettings(remoteJid)
+	if settings.AntiLinkEnabled && (strings.Contains(text, "http://") || strings.Contains(text, "https://") || strings.Contains(text, "www.")) {
+		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+		if !isAdmin {
+			fmt.Printf("[SECURITY] Anti-Link triggered for %s\n", senderJid)
+			// Serait bien d'avoir une fonction deleteMessage
+			evoURL := os.Getenv("EVOLUTION_URL")
+			if evoURL == "" { evoURL = "http://evolution-api:8080" }
+			apiKey := os.Getenv("AUTHENTICATION_API_KEY")
+			client := resty.New()
+			_, _ = client.R().
+				SetHeader("apikey", apiKey).
+				SetBody(map[string]interface{}{
+					"key": map[string]interface{}{
+						"remoteJid": remoteJid,
+						"fromMe":    false,
+						"id":        msgId,
+					},
+				}).
+				Post(fmt.Sprintf("%s/message/delete/%s", evoURL, instance))
+			
+			warnMsg := fmt.Sprintf("🚫 @%s, les liens ne sont pas autorisés dans ce groupe.", strings.Split(senderJid, "@")[0])
+			go sendWhatsAppMessage(instance, remoteJid, warnMsg, "", senderJid)
+			return c.NoContent(http.StatusOK)
+		}
+	}
 	
 	fmt.Printf("[%s] Received message from %s (%s): %s\n", instance, data.PushName, senderJid, text)
 
@@ -245,9 +275,20 @@ func handleWebhook(c echo.Context) error {
 	fmt.Printf("[DEBUG] CLEAN_TEXT_AFTER=%s IS_MENTIONED=%v\n", cleanText, isMentioned)
 
 	// VÉRIFIER LES COMMANDES D'ABORD (Bypass LLM)
-	if cmd, args, isCmd := IsCommand(cleanText); isCmd {
-		fmt.Printf("[DEBUG] EXECUTING_COMMAND=%s ARGS=%s\n", cmd, args)
-		go handleCommand(instance, remoteJid, cmd, args, msgId, senderJid, quotedMsgId)
+	cmd, cmdArgs, isCmd := IsCommand(cleanText)
+	if !isCmd && isMentioned && cleanText != "" {
+		// If mentioned and not a '.' command, check if the first word is a command
+		parts := strings.Fields(cleanText)
+		if len(parts) > 0 {
+			cmd = parts[0]
+			cmdArgs = strings.TrimSpace(cleanText[len(cmd):])
+			isCmd = true // Treat as command
+		}
+	}
+
+	if isCmd {
+		fmt.Printf("[DEBUG] EXECUTING_COMMAND=%s ARGS=%s\n", cmd, cmdArgs)
+		go handleCommand(instance, remoteJid, cmd, cmdArgs, msgId, senderJid, quotedMsgId)
 		return c.NoContent(http.StatusOK)
 	}
 
@@ -259,7 +300,10 @@ func handleWebhook(c echo.Context) error {
 	}
 
 	// LOGIQUE DE DÉCLENCHEMENT (Privé / Mention / Reply)
-	botJid := "237620864894@s.whatsapp.net"
+	botJid := os.Getenv("BOT_JID")
+	if botJid == "" {
+		botJid = "237620864894@s.whatsapp.net"
+	}
 	
 	isPrivateChat := !strings.HasSuffix(remoteJid, "@g.us")
 	isReplyToBot := false
@@ -351,7 +395,7 @@ Poulga :`, userText)
 	default: // IntentChat
 		fmt.Printf("[DEBUG] ROUTER_FALLBACK_TO_OLLAMA INTENT=chat\n")
 		// Chat normal - Version équilibrée
-		history, _ := getRecentMessages(remoteJid, 8)
+		history, _ := getRecentMessages(remoteJid, 10)
 		facts, _ := getFacts(remoteJid)
 		if len(facts) > 3 {
 			facts = facts[:3]
@@ -379,7 +423,7 @@ Poulga :`, userText)
 		}
 		
 		ollamaStart := time.Now()
-		response, _ := callOllama(prompt, nil, 0.3)
+		response, _ := callOllama(prompt, nil, 0.95)
 		ollamaTime := time.Since(ollamaStart)
 		fmt.Printf("[TIMING] OLLAMA_CHAT: %.1fms\n", ollamaTime.Seconds()*1000)
 		

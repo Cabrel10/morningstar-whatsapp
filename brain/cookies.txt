@@ -1,0 +1,3 @@
+# Netscape HTTP Cookie File
+# This is a placeholder. Export your YouTube cookies using a browser extension (e.g., "Get cookies.txt LOCALLY")
+# and paste the content here to bypass YouTube bot detection.

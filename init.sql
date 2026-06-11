@@ -132,3 +132,24 @@ CREATE TABLE IF NOT EXISTS active_sessions (
 
 CREATE INDEX IF NOT EXISTS idx_active_sessions_group ON active_sessions(group_jid);
 CREATE INDEX IF NOT EXISTS idx_active_sessions_user ON active_sessions(user_jid);
+
+-- Group Configuration & Settings
+CREATE TABLE IF NOT EXISTS group_settings (
+    group_jid VARCHAR(255) PRIMARY KEY,
+    welcome_enabled BOOLEAN DEFAULT TRUE,
+    antilink_enabled BOOLEAN DEFAULT FALSE,
+    antispam_enabled BOOLEAN DEFAULT FALSE,
+    antisuppression_enabled BOOLEAN DEFAULT FALSE,
+    is_closed BOOLEAN DEFAULT FALSE,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- User Warnings
+CREATE TABLE IF NOT EXISTS user_warnings (
+    id SERIAL PRIMARY KEY,
+    jid VARCHAR(255) NOT NULL,
+    group_jid VARCHAR(255) NOT NULL,
+    warning_count INTEGER DEFAULT 0,
+    last_warning TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(jid, group_jid)
+);

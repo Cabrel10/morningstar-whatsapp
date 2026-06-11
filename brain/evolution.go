@@ -83,7 +83,8 @@ func getGroupMetadata(instance, groupJid string) ([]string, error) {
 
 	var groupInfo struct {
 		Participants []struct {
-			Id string `json:"id"`
+			Id    string `json:"id"`
+			Admin string `json:"admin"`
 		} `json:"participants"`
 	}
 
@@ -97,6 +98,64 @@ func getGroupMetadata(instance, groupJid string) ([]string, error) {
 	}
 
 	return participants, nil
+}
+
+func isUserAdmin(instance, groupJid, userJid string) (bool, error) {
+	evoURL := os.Getenv("EVOLUTION_URL")
+	if evoURL == "" {
+		evoURL = "http://evolution-api:8080"
+	}
+	apiKey := os.Getenv("AUTHENTICATION_API_KEY")
+
+	client := resty.New()
+	client.SetTimeout(15 * time.Second)
+	resp, err := client.R().
+		SetHeader("apikey", apiKey).
+		SetQueryParam("groupJid", groupJid).
+		Get(fmt.Sprintf("%s/group/findGroupInfos/%s", evoURL, instance))
+
+	if err != nil {
+		return false, err
+	}
+
+	var groupInfo struct {
+		Participants []struct {
+			Id    string `json:"id"`
+			Admin string `json:"admin"`
+		} `json:"participants"`
+	}
+
+	if err := json.Unmarshal(resp.Body(), &groupInfo); err != nil {
+		return false, err
+	}
+
+	for _, p := range groupInfo.Participants {
+		if p.Id == userJid {
+			return p.Admin != "", nil
+		}
+	}
+
+	return false, nil
+}
+
+func kickUser(instance, groupJid, userJid string) error {
+	evoURL := os.Getenv("EVOLUTION_URL")
+	if evoURL == "" {
+		evoURL = "http://evolution-api:8080"
+	}
+	apiKey := os.Getenv("AUTHENTICATION_API_KEY")
+
+	client := resty.New()
+	client.SetTimeout(15 * time.Second)
+	_, err := client.R().
+		SetHeader("apikey", apiKey).
+		SetBody(map[string]interface{}{
+			"groupJid": groupJid,
+			"participants": []string{userJid},
+		}).
+		Post(fmt.Sprintf("%s/group/updateParticipant/%s?action=remove", evoURL, instance))
+
+	return err
 }
 
 func sendSticker(instance, remoteJid, stickerBase64 string) error {

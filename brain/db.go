@@ -234,6 +234,37 @@ func addFact(remoteJid, content string) error {
 	return err
 }
 
+func deleteFact(remoteJid string, id int) error {
+	_, err := db.Exec(context.Background(),
+		"DELETE FROM facts WHERE remote_jid = $1 AND id = $2",
+		remoteJid, id)
+	return err
+}
+
+type FactEntry struct {
+	ID      int
+	Content string
+}
+
+func getFactsDetailed(remoteJid string) ([]FactEntry, error) {
+	rows, err := db.Query(context.Background(),
+		"SELECT id, content FROM facts WHERE remote_jid = $1 ORDER BY created_at DESC LIMIT 10",
+		remoteJid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var facts []FactEntry
+	for rows.Next() {
+		var f FactEntry
+		if err := rows.Scan(&f.ID, &f.Content); err == nil {
+			facts = append(facts, f)
+		}
+	}
+	return facts, nil
+}
+
 
 // Active Sessions Management
 func createSession(groupJid, userJid, sessionType string, stateJson string) (int, error) {
@@ -269,5 +300,67 @@ func closeSession(groupJid, userJid string) error {
 		`DELETE FROM active_sessions
 		 WHERE group_jid = $1 AND user_jid = $2`,
 		groupJid, userJid)
+	return err
+}
+
+// Group Settings Management
+type GroupSettings struct {
+	WelcomeEnabled        bool
+	AntiLinkEnabled       bool
+	AntiSpamEnabled       bool
+	AntiSuppressionEnabled bool
+	IsClosed              bool
+}
+
+func getGroupSettings(groupJid string) (GroupSettings, error) {
+	var s GroupSettings
+	err := db.QueryRow(context.Background(),
+		`SELECT welcome_enabled, antilink_enabled, antispam_enabled, antisuppression_enabled, is_closed 
+		 FROM group_settings WHERE group_jid = $1`,
+		groupJid).Scan(&s.WelcomeEnabled, &s.AntiLinkEnabled, &s.AntiSpamEnabled, &s.AntiSuppressionEnabled, &s.IsClosed)
+	
+	if err == pgx.ErrNoRows {
+		// Return default settings
+		return GroupSettings{WelcomeEnabled: true}, nil
+	}
+	return s, err
+}
+
+func updateGroupSetting(groupJid, column string, value bool) error {
+	query := fmt.Sprintf(`INSERT INTO group_settings (group_jid, %s) VALUES ($1, $2)
+		 ON CONFLICT (group_jid) DO UPDATE SET %s = EXCLUDED.%s, updated_at = CURRENT_TIMESTAMP`,
+		 column, column, column)
+	_, err := db.Exec(context.Background(), query, groupJid, value)
+	return err
+}
+
+// Warning Management
+func addWarning(jid, groupJid string) (int, error) {
+	var count int
+	err := db.QueryRow(context.Background(),
+		`INSERT INTO user_warnings (jid, group_jid, warning_count) VALUES ($1, $2, 1)
+		 ON CONFLICT (jid, group_jid) DO UPDATE SET 
+		 warning_count = user_warnings.warning_count + 1,
+		 last_warning = CURRENT_TIMESTAMP
+		 RETURNING warning_count`,
+		 jid, groupJid).Scan(&count)
+	return count, err
+}
+
+func getWarnings(jid, groupJid string) (int, error) {
+	var count int
+	err := db.QueryRow(context.Background(),
+		"SELECT warning_count FROM user_warnings WHERE jid = $1 AND group_jid = $2",
+		jid, groupJid).Scan(&count)
+	if err == pgx.ErrNoRows {
+		return 0, nil
+	}
+	return count, err
+}
+
+func resetWarnings(jid, groupJid string) error {
+	_, err := db.Exec(context.Background(),
+		"DELETE FROM user_warnings WHERE jid = $1 AND group_jid = $2",
+		jid, groupJid)
 	return err
 }

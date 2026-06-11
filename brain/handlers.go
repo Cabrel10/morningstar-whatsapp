@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -126,27 +127,240 @@ func handleCommand(instance, remoteJid, cmd, args, msgId, senderJid, quotedMsgId
 
 	switch cmd {
 	case "help", "menu":
-		response = `Je suis Poulga, votre partenaire et associée du groupe ! 🚀
+		response = `📋 *Commandes Poulga V1*
 
-📚 Je peux :
-  • Répondre à vos questions
-  • Résumer une discussion
-  • Retrouver une information passée
-  • Télécharger (YouTube, FB, TikTok)
-  • Créer des stickers
+🏠 *Poulga Core*
+.aide – Affiche cette aide
+.qui-es-tu – Présentation de Poulga
+.mémoire – Liste les faits mémorisés
+.résumé – Résumé des discussions récentes
+.statistiques – Stats du groupe
+.personnalité <txt> – Change mon caractère
 
-⚙️ Commandes :
-  .help - Affiche cette aide
-  .ping - Vérifie si je suis en ligne
-  .yt [url] - Télécharge une vidéo YouTube
-  .audio [url] - Télécharge l'audio
-  .fb [url] - Vidéo Facebook
-  .tt [url] - Vidéo TikTok
-  .tagall - Mentionne tout le monde
-  .sticker - Crée un sticker (cite une image)`
+🛠️ *Administration*
+.tagall – Mentionne tout le monde
+.warn @user – Donne un avertissement (3 = kick)
+.warn-list – Liste les avertissements
+.warn-reset @user – Reset les avertissements
+.ouvrir / .fermer – Ouvre/Ferme le groupe (Admin)
 
-	case "ping":
-		response = "Pong ! 🏓 Bot Poulga actif et prêt à vous aider."
+⚙️ *Gestion Groupe*
+.bienvenue on/off – Active/Désactive l'accueil
+.anti-lien on/off – Bloque les liens externes
+
+📥 *Téléchargement*
+.yt <url> – Vidéo YouTube
+.audio <url> – Audio MP3
+.fb <url> – Vidéo Facebook
+.tt <url> – Vidéo TikTok
+
+🔍 *Recherche & Dev*
+.recherche <sujet> – Fouille ma mémoire
+.code <lang> <txt> – Aide au codage
+
+💻 *Système (VPS)*
+.statut-serveur – CPU, RAM, Disque, Docker`
+
+	case "qui-es-tu":
+		response = "Je suis Poulga, votre associée intelligente. Je mémorise vos échanges pour vous aider à retrouver des infos, résumer vos débats et gérer ce groupe avec efficacité. 🚀"
+
+	case "mémoire":
+		facts, err := getFactsDetailed(remoteJid)
+		if err != nil || len(facts) == 0 {
+			response = "Ma mémoire est vide pour le moment. Partagez des infos pour que je les retienne ! 🧠"
+		} else {
+			var sb strings.Builder
+			sb.WriteString("📝 *Faits mémorisés :*\n\n")
+			for _, f := range facts {
+				sb.WriteString(fmt.Sprintf("[%d] %s\n", f.ID, f.Content))
+			}
+			response = sb.String()
+		}
+
+	case "warn":
+		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+		if !isAdmin {
+			response = "Désolée, cette commande est réservée aux admins. 👑"
+			break
+		}
+		targetJid := ""
+		if strings.Contains(args, "@") {
+			targetJid = strings.Fields(args)[0]
+			if !strings.Contains(targetJid, "@") {
+				targetJid = targetJid + "@s.whatsapp.net"
+			}
+		} else if quotedMsgId != "" {
+			// Find participant from quoted message - would need more logic or pass quotedSender
+			response = "Merci de mentionner l'utilisateur à avertir. Ex: .warn @user"
+			break
+		}
+
+		if targetJid == "" {
+			response = "Usage: .warn @user"
+			break
+		}
+
+		count, err := addWarning(targetJid, remoteJid)
+		if err != nil {
+			response = "Erreur lors de l'ajout de l'avertissement. ❌"
+		} else {
+			response = fmt.Sprintf("⚠️ Avertissement pour @%s. (Total: %d/3)", strings.Split(targetJid, "@")[0], count)
+			if count >= 3 {
+				response += "\n\n🚫 Limite atteinte. Expulsion en cours..."
+				go kickUser(instance, remoteJid, targetJid)
+				resetWarnings(targetJid, remoteJid)
+			}
+		}
+
+	case "warn-reset":
+		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+		if !isAdmin {
+			response = "Désolée, cette commande est réservée aux admins. 👑"
+			break
+		}
+		targetJid := strings.TrimSpace(args)
+		if targetJid == "" {
+			response = "Usage: .warn-reset @user"
+		} else {
+			if !strings.Contains(targetJid, "@") { targetJid += "@s.whatsapp.net" }
+			err := resetWarnings(targetJid, remoteJid)
+			if err != nil {
+				response = "Erreur lors du reset. ❌"
+			} else {
+				response = fmt.Sprintf("✅ Avertissements réinitialisés pour @%s.", strings.Split(targetJid, "@")[0])
+			}
+		}
+
+	case "bienvenue":
+		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+		if !isAdmin {
+			response = "Désolée, cette commande est réservée aux admins. 👑"
+			break
+		}
+		if args == "on" {
+			updateGroupSetting(remoteJid, "welcome_enabled", true)
+			response = "✅ Messages de bienvenue activés."
+		} else if args == "off" {
+			updateGroupSetting(remoteJid, "welcome_enabled", false)
+			response = "✅ Messages de bienvenue désactivés."
+		} else {
+			response = "Usage: .bienvenue on/off"
+		}
+
+	case "anti-lien":
+		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+		if !isAdmin {
+			response = "Désolée, cette commande est réservée aux admins. 👑"
+			break
+		}
+		if args == "on" {
+			updateGroupSetting(remoteJid, "antilink_enabled", true)
+			response = "🚫 Anti-lien activé. Les liens externes seront supprimés."
+		} else if args == "off" {
+			updateGroupSetting(remoteJid, "antilink_enabled", false)
+			response = "✅ Anti-lien désactivé."
+		} else {
+			response = "Usage: .anti-lien on/off"
+		}
+
+	case "statut-serveur":
+		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+		if !isAdmin {
+			response = "Désolée, cette commande est réservée aux admins. 👑"
+			break
+		}
+		
+		// CPU Usage
+		cpuCmd := exec.Command("sh", "-c", "top -bn1 | grep 'Cpu(s)' | awk '{print $2}'")
+		cpuOut, _ := cpuCmd.Output()
+		
+		// Memory Usage
+		memCmd := exec.Command("sh", "-c", "free -m | awk 'NR==2{printf \"%.2f%% (%d/%d MB)\", $3*100/$2, $3, $2}'")
+		memOut, _ := memCmd.Output()
+		
+		// Disk Usage
+		diskCmd := exec.Command("sh", "-c", "df -h / | awk 'NR==2{print $5 \" (\" $3 \"/\" $2 \")\"}'")
+		diskOut, _ := diskCmd.Output()
+		
+		// Uptime
+		uptimeCmd := exec.Command("uptime", "-p")
+		uptimeOut, _ := uptimeCmd.Output()
+
+		response = fmt.Sprintf("💻 *Statut du Serveur (VPS)*\n\n"+
+			"⏱️ *Uptime:* %s\n"+
+			"🧠 *CPU:* %s%%\n"+
+			"💾 *RAM:* %s\n"+
+			"💽 *Disque:* %s\n"+
+			"🐳 *Docker:* Actif (Brain, Evolution, DB, Ollama)", 
+			strings.TrimSpace(string(uptimeOut)),
+			strings.TrimSpace(string(cpuOut)),
+			strings.TrimSpace(string(memOut)),
+			strings.TrimSpace(string(diskOut)))
+
+	case "recherche":
+		if args == "" {
+			response = "Que cherches-tu ? Ex: .recherche docker swarm"
+		} else {
+			handleSearch(instance, remoteJid, args, msgId, senderJid, time.Now())
+			return
+		}
+
+	case "warn-list":
+		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+		if !isAdmin {
+			response = "Désolée, cette commande est réservée aux admins. 👑"
+			break
+		}
+		rows, err := db.Query(context.Background(), "SELECT jid, warning_count FROM user_warnings WHERE group_jid = $1", remoteJid)
+		if err != nil {
+			response = "Erreur lors de la récupération des avertissements. ❌"
+		} else {
+			defer rows.Close()
+			var sb strings.Builder
+			sb.WriteString("⚠️ *Liste des avertissements :*\n\n")
+			found := false
+			for rows.Next() {
+				var jid string
+				var count int
+				if err := rows.Scan(&jid, &count); err == nil {
+					sb.WriteString(fmt.Sprintf("- @%s : %d/3\n", strings.Split(jid, "@")[0], count))
+					found = true
+				}
+			}
+			if !found {
+				response = "Aucun utilisateur averti pour le moment. ✅"
+			} else {
+				response = sb.String()
+			}
+		}
+
+	case "ouvrir", "fermer":
+		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+		if !isAdmin {
+			response = "Désolée, cette commande est réservée aux admins. 👑"
+			break
+		}
+		action := "not_announcement"
+		if cmd == "fermer" { action = "announcement" }
+		
+		evoURL := os.Getenv("EVOLUTION_URL")
+		if evoURL == "" { evoURL = "http://evolution-api:8080" }
+		apiKey := os.Getenv("AUTHENTICATION_API_KEY")
+
+		client := resty.New()
+		_, err := client.R().
+			SetHeader("apikey", apiKey).
+			Post(fmt.Sprintf("%s/group/updateSetting/%s?groupJid=%s&action=%s", evoURL, instance, remoteJid, action))
+		
+		if err != nil {
+			response = "Erreur lors de l'opération. ❌"
+		} else {
+			if cmd == "fermer" {
+				response = "🔒 Groupe fermé. Seuls les admins peuvent envoyer des messages."
+			} else {
+				response = "🔓 Groupe ouvert. Tout le monde peut participer."
+			}
+		}
 
 	case "yt", "fb", "tt", "video", "audio":
 		if args == "" {
@@ -277,20 +491,26 @@ func handleDownload(instance, remoteJid, cmd, url, msgId, senderJid string) {
 	if cmd == "audio" {
 		mediaType = "audio"
 		args = []string{
+			"--cookies", "/app/cookies.txt",
 			"--extract-audio",
 			"--audio-format", "mp3",
 			"--max-filesize", "50M",
 			"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 			"--geo-bypass",
+			"--no-check-certificates",
+			"--no-warnings",
 			"-o", outputFile + ".%(ext)s",
 			url,
 		}
 	} else {
 		args = []string{
+			"--cookies", "/app/cookies.txt",
 			"-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
 			"--max-filesize", "50M",
 			"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 			"--geo-bypass",
+			"--no-check-certificates",
+			"--no-warnings",
 			"-o", outputFile + ".%(ext)s",
 			url,
 		}

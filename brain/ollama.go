@@ -34,12 +34,12 @@ func callOllama(prompt string, images []string, temperature float64) (string, er
 			Options: map[string]interface{}{
 				"num_thread":     2,   // 2 threads par requête (2*2 = 4 coeurs vCPU)
 				"num_batch":      128, // Optimisation CPU
-				"num_ctx":        2048, // Réduit pour libérer de la RAM et accélérer
+				"num_ctx":        3072, // Augmenté pour plus de contexte
 				"numa":           true, // Optimisation accès mémoire
-				"temperature":    0.3, // Réponses focalisées et cohérentes
-				"top_p":          0.9,
-				"repeat_penalty": 1.2, // Évite les répétitions
-				"num_predict":    128, // Limite la longueur pour forcer la brièveté
+				"temperature":    temperature, // Utilise la température passée en paramètre
+				"top_p":          0.95,
+				"repeat_penalty": 1.15, // Moins sévère pour plus de fluidité
+				"num_predict":    256, // Augmenté pour des réponses plus complètes
 			},
 			Images: images,
 		}).
