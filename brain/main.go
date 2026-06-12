@@ -309,13 +309,19 @@ func handleWebhook(c echo.Context) error {
 	isReplyToBot := false
 
 	// Vérifier si on répond à l'un des messages de Poulga
-	if ctxInfo != nil && ctxInfo.Participant == botJid {
-		isReplyToBot = true
+	if ctxInfo != nil {
+		fmt.Printf("[DEBUG] QUOTED_INFO: participant=%s botJid=%s stanzaId=%s\n", ctxInfo.Participant, botJid, ctxInfo.StanzaId)
+		// Vérifier si le sender du message cité est Poulga (peu importe le format)
+		if strings.Contains(ctxInfo.Participant, "237620864894") || ctxInfo.Participant == botJid {
+			isReplyToBot = true
+			fmt.Printf("[DEBUG] REPLY_TO_BOT=true\n")
+		}
 	}
 
 	// DÉCISION FINALE
 	shouldRespond := false
 	if isPrivateChat || isMentioned || isReplyToBot {
+		fmt.Printf("[DEBUG] SHOULD_RESPOND=true (private=%v, mentioned=%v, replyToBot=%v)\n", isPrivateChat, isMentioned, isReplyToBot)
 		shouldRespond = true
 	}
 
