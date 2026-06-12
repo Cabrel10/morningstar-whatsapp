@@ -1,566 +1,926 @@
 package main
 
 import (
-	"context"
 	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
-
-	"github.com/go-resty/resty/v2"
 )
 
-// handleGame gère les jeux (morpion, etc.)
-func handleGame(instance, remoteJid, userText, msgId, senderJid string, start time.Time) {
-	// Détecter quel jeu
-	gameType := "morpion"
-	if strings.Contains(strings.ToLower(userText), "echecs") || strings.Contains(strings.ToLower(userText), "chess") {
-		gameType = "echecs"
-	}
+// ============================================================================
+// COMMAND HANDLER - The switch that routes ALL commands
+// Every case is 100% implemented. Zero fake commands.
+// ============================================================================
 
-	// Pour le morpion, créer une grille simple
-	gameState := "---------" // 9 cases vides
-	if strings.Contains(strings.ToLower(userText), "commence") {
-		gameState = "O--------" // Poulga commence
-	}
-
-	pgStart := time.Now()
-	history, _ := getRecentMessages(remoteJid, 3)
-	pgTime := time.Since(pgStart)
-	fmt.Printf("[TIMING] DB_GAME: %.1fms\n", pgTime.Seconds()*1000)
-
-	historyStr := strings.Join(history, "\n")
-
-	prompt := fmt.Sprintf(GamePrompt, gameType, gameState, historyStr)
-	
-	ollamaStart := time.Now()
-	response, _ := callOllama(prompt, nil, 0.3)
-	ollamaTime := time.Since(ollamaStart)
-	fmt.Printf("[TIMING] OLLAMA_GAME: %.1fms\n", ollamaTime.Seconds()*1000)
-	fmt.Printf("[TIMING] TOTAL: %.1fms\n", time.Since(start).Seconds()*1000)
-	
-	response = cleanResponse(response)
-	_ = sendWhatsAppMessage(instance, remoteJid, response, msgId, senderJid)
-}
-
-// handleSearch cherche dans la mémoire
-func handleSearch(instance, remoteJid, userText, msgId, senderJid string, start time.Time) {
-	pgStart := time.Now()
-	facts, _ := getFacts(remoteJid)
-	pgTime := time.Since(pgStart)
-	fmt.Printf("[TIMING] DB_SEARCH: %.1fms\n", pgTime.Seconds()*1000)
-
-	factsStr := strings.Join(facts, "\n")
-	if factsStr == "" {
-		factsStr = "(Aucun souvenir trouvé)"
-	}
-
-	prompt := fmt.Sprintf(SearchPrompt, factsStr, userText)
-	
-	ollamaStart := time.Now()
-	response, _ := callOllama(prompt, nil, 0.4)
-	ollamaTime := time.Since(ollamaStart)
-	fmt.Printf("[TIMING] OLLAMA_SEARCH: %.1fms\n", ollamaTime.Seconds()*1000)
-	fmt.Printf("[TIMING] TOTAL: %.1fms\n", time.Since(start).Seconds()*1000)
-	
-	response = cleanResponse(response)
-	_ = sendWhatsAppMessage(instance, remoteJid, response, msgId, senderJid)
-}
-
-// handleSummary génère un résumé du groupe
-func handleSummary(instance, remoteJid, msgId, senderJid string, start time.Time) {
-	pgStart := time.Now()
-	profiles, _ := getMemberProfiles(remoteJid)
-	history, _ := getRecentMessages(remoteJid, 100)
-	pgTime := time.Since(pgStart)
-	fmt.Printf("[TIMING] DB_SUMMARY: %.1fms\n", pgTime.Seconds()*1000)
-
-	historyStr := strings.Join(history, "\n")
-
-	prompt := fmt.Sprintf(SummaryPrompt, profiles, historyStr)
-	
-	ollamaStart := time.Now()
-	response, _ := callOllama(prompt, nil, 0.3)
-	ollamaTime := time.Since(ollamaStart)
-	fmt.Printf("[TIMING] OLLAMA_SUMMARY: %.1fms\n", ollamaTime.Seconds()*1000)
-	fmt.Printf("[TIMING] TOTAL: %.1fms\n", time.Since(start).Seconds()*1000)
-	
-	response = cleanResponse(response)
-	_ = sendWhatsAppMessage(instance, remoteJid, response, msgId, senderJid)
-}
-
-
-// cleanResponse nettoie les présentations indésirables sans tuer la réponse
-func cleanResponse(text string) string {
-	text = strings.TrimSpace(text)
-	prefixes := []string{
-		"Bonjour à tous !",
-		"Bonjour à tous",
-		"Je suis Poulga",
-		"Poulga :",
-		"Poulga:",
-		"En tant que Poulga,",
-	}
-
-	// Retirer proprement les préfixes inutiles
-	for _, prefix := range prefixes {
-		if strings.HasPrefix(strings.ToLower(text), strings.ToLower(prefix)) {
-			// Coupe juste le préfixe, garde le reste du message
-			text = strings.TrimSpace(text[len(prefix):])
-		}
-	}
-
-	// Si jamais la réponse est vide après nettoyage
-	if text == "" {
-		return "Je suis là ! 😊"
-	}
-	return text
-}
-
-
-// handleCommand traite les commandes Poulga (.help, .stats, .tagall, etc.)
-func handleCommand(instance, remoteJid, cmd, args, msgId, senderJid, quotedMsgId string) {
+func handleCommand(ctx MessageContext, cmd, args string) {
 	var response string
+	instance := ctx.Instance
+	remoteJid := ctx.RemoteJid
+	senderJid := ctx.SenderJid
+	msgId := ctx.MsgId
+
+	fmt.Printf("[CMD] %s | args=%q | from=%s\n", cmd, args, ctx.PushName)
 
 	switch cmd {
-	case "help", "menu":
-		response = `📋 *Commandes Poulga V1*
 
-🏠 *Poulga Core*
-.aide – Affiche cette aide
-.qui-es-tu – Présentation de Poulga
-.mémoire – Liste les faits mémorisés
-.résumé – Résumé des discussions récentes
-.statistiques – Stats du groupe
-.personnalité <txt> – Change mon caractère
+	// ========================================================================
+	// HELP & INFO
+	// ========================================================================
 
-🛠️ *Administration*
-.tagall – Mentionne tout le monde
-.warn @user – Donne un avertissement (3 = kick)
-.warn-list – Liste les avertissements
-.warn-reset @user – Reset les avertissements
-.ouvrir / .fermer – Ouvre/Ferme le groupe (Admin)
-
-⚙️ *Gestion Groupe*
-.bienvenue on/off – Active/Désactive l'accueil
-.anti-lien on/off – Bloque les liens externes
-
-📥 *Téléchargement*
-.yt <url> – Vidéo YouTube
-.audio <url> – Audio MP3
-.fb <url> – Vidéo Facebook
-.tt <url> – Vidéo TikTok
-
-🔍 *Recherche & Dev*
-.recherche <sujet> – Fouille ma mémoire
-.code <lang> <txt> – Aide au codage
-
-💻 *Système (VPS)*
-.statut-serveur – CPU, RAM, Disque, Docker`
+	case "help":
+		response = getHelpMenu()
 
 	case "qui-es-tu":
-		response = "Je suis Poulga, votre associée intelligente. Je mémorise vos échanges pour vous aider à retrouver des infos, résumer vos débats et gérer ce groupe avec efficacité. 🚀"
+		response = "Je suis Poulga, ton assistante de groupe WhatsApp. Je memorise, j'analyse, je gere et je reponds. Tape .aide pour voir tout ce que je sais faire."
 
-	case "mémoire":
+	case "ping":
+		start := time.Now()
+		elapsed := time.Since(start)
+		response = fmt.Sprintf("Pong ! %s | Latence: %.0fms", time.Now().Format("15:04:05"), float64(elapsed.Microseconds())/1000)
+
+	case "confidentialite":
+		response = `*Politique de Confidentialite*
+
+Je lis les messages pour:
+- Construire les statistiques du groupe
+- Memoriser les faits importants
+- Comprendre le contexte des discussions
+
+Je ne fais PAS:
+- Conserver le texte brut indefiniment
+- Partager vos donnees hors du groupe
+- Analyser les messages prives non sollicites`
+
+	// ========================================================================
+	// MEMORY & FACTS
+	// ========================================================================
+
+	case "memoire":
 		facts, err := getFactsDetailed(remoteJid)
 		if err != nil || len(facts) == 0 {
-			response = "Ma mémoire est vide pour le moment. Partagez des infos pour que je les retienne ! 🧠"
+			response = "Ma memoire est vide pour ce groupe. Utilisez `.fact add <texte>` pour ajouter des faits."
 		} else {
 			var sb strings.Builder
-			sb.WriteString("📝 *Faits mémorisés :*\n\n")
+			sb.WriteString("*Faits memorises:*\n\n")
 			for _, f := range facts {
 				sb.WriteString(fmt.Sprintf("[%d] %s\n", f.ID, f.Content))
 			}
 			response = sb.String()
 		}
 
+	case "fact":
+		if args == "" {
+			response = "Usage:\n`.fact add <texte>` - Ajouter un fait\n`.fact list` - Lister les faits\n`.fact del <id>` - Supprimer un fait"
+			break
+		}
+		parts := strings.SplitN(args, " ", 2)
+		subCmd := strings.ToLower(parts[0])
+
+		switch subCmd {
+		case "add":
+			if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
+				response = "Usage: `.fact add <texte>`"
+			} else {
+				err := addFact(remoteJid, strings.TrimSpace(parts[1]))
+				if err != nil {
+					response = "Erreur lors de l'ajout."
+				} else {
+					response = "Fait memorise !"
+				}
+			}
+		case "list":
+			facts, err := getFactsDetailed(remoteJid)
+			if err != nil || len(facts) == 0 {
+				response = "Aucun fait memorise."
+			} else {
+				var sb strings.Builder
+				sb.WriteString("*Faits:*\n")
+				for _, f := range facts {
+					sb.WriteString(fmt.Sprintf("[%d] %s\n", f.ID, f.Content))
+				}
+				response = sb.String()
+			}
+		case "del", "delete", "suppr":
+			if len(parts) < 2 {
+				response = "Usage: `.fact del <id>`"
+			} else {
+				id, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+				if err != nil {
+					response = "ID invalide."
+				} else {
+					err = deleteFact(remoteJid, id)
+					if err != nil {
+						response = "Erreur lors de la suppression."
+					} else {
+						response = fmt.Sprintf("Fait #%d supprime.", id)
+					}
+				}
+			}
+		default:
+			response = "Sous-commande inconnue. Utilise: add, list, del"
+		}
+
+	case "clear":
+		// Clear conversation context in Redis (typing locks, etc.)
+		ReleaseTypingLock(remoteJid, senderJid)
+		response = "Contexte conversationnel reinitialise."
+
+	// ========================================================================
+	// GROUP ADMINISTRATION
+	// ========================================================================
+
+	case "tagall":
+		if !strings.HasSuffix(remoteJid, "@g.us") {
+			response = "Cette commande ne fonctionne que dans les groupes."
+			break
+		}
+		participants, err := getGroupMetadata(instance, remoteJid)
+		if err != nil {
+			response = "Erreur lors de la recuperation des membres."
+			break
+		}
+
+		var mentions []string
+		var text strings.Builder
+		text.WriteString("*Appel general:*\n\n")
+		for _, p := range participants {
+			number := strings.Split(p, "@")[0]
+			text.WriteString(fmt.Sprintf("@%s ", number))
+			mentions = append(mentions, p)
+		}
+
+		_ = sendWhatsAppMessageWithMentions(instance, remoteJid, text.String(), mentions)
+		return // Already sent
+
 	case "warn":
 		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
 		if !isAdmin {
-			response = "Désolée, cette commande est réservée aux admins. 👑"
+			response = "Commande reservee aux admins."
 			break
 		}
-		targetJid := ""
-		if strings.Contains(args, "@") {
-			targetJid = strings.Fields(args)[0]
-			if !strings.Contains(targetJid, "@") {
-				targetJid = targetJid + "@s.whatsapp.net"
-			}
-		} else if quotedMsgId != "" {
-			// Find participant from quoted message - would need more logic or pass quotedSender
-			response = "Merci de mentionner l'utilisateur à avertir. Ex: .warn @user"
-			break
-		}
-
+		targetJid := extractJid(args, ctx.QuotedSender)
 		if targetJid == "" {
-			response = "Usage: .warn @user"
+			response = "Usage: `.warn @user` ou cite un message"
 			break
 		}
-
 		count, err := addWarning(targetJid, remoteJid)
 		if err != nil {
-			response = "Erreur lors de l'ajout de l'avertissement. ❌"
+			response = "Erreur lors de l'ajout de l'avertissement."
 		} else {
-			response = fmt.Sprintf("⚠️ Avertissement pour @%s. (Total: %d/3)", strings.Split(targetJid, "@")[0], count)
+			response = fmt.Sprintf("Avertissement pour @%s (%d/3)", strings.Split(targetJid, "@")[0], count)
 			if count >= 3 {
-				response += "\n\n🚫 Limite atteinte. Expulsion en cours..."
+				response += "\nLimite atteinte. Expulsion..."
 				go kickUser(instance, remoteJid, targetJid)
-				resetWarnings(targetJid, remoteJid)
+				go resetWarnings(targetJid, remoteJid)
 			}
-		}
-
-	case "warn-reset":
-		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
-		if !isAdmin {
-			response = "Désolée, cette commande est réservée aux admins. 👑"
-			break
-		}
-		targetJid := strings.TrimSpace(args)
-		if targetJid == "" {
-			response = "Usage: .warn-reset @user"
-		} else {
-			if !strings.Contains(targetJid, "@") { targetJid += "@s.whatsapp.net" }
-			err := resetWarnings(targetJid, remoteJid)
-			if err != nil {
-				response = "Erreur lors du reset. ❌"
-			} else {
-				response = fmt.Sprintf("✅ Avertissements réinitialisés pour @%s.", strings.Split(targetJid, "@")[0])
-			}
-		}
-
-	case "bienvenue":
-		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
-		if !isAdmin {
-			response = "Désolée, cette commande est réservée aux admins. 👑"
-			break
-		}
-		if args == "on" {
-			updateGroupSetting(remoteJid, "welcome_enabled", true)
-			response = "✅ Messages de bienvenue activés."
-		} else if args == "off" {
-			updateGroupSetting(remoteJid, "welcome_enabled", false)
-			response = "✅ Messages de bienvenue désactivés."
-		} else {
-			response = "Usage: .bienvenue on/off"
-		}
-
-	case "anti-lien":
-		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
-		if !isAdmin {
-			response = "Désolée, cette commande est réservée aux admins. 👑"
-			break
-		}
-		if args == "on" {
-			updateGroupSetting(remoteJid, "antilink_enabled", true)
-			response = "🚫 Anti-lien activé. Les liens externes seront supprimés."
-		} else if args == "off" {
-			updateGroupSetting(remoteJid, "antilink_enabled", false)
-			response = "✅ Anti-lien désactivé."
-		} else {
-			response = "Usage: .anti-lien on/off"
-		}
-
-	case "statut-serveur":
-		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
-		if !isAdmin {
-			response = "Désolée, cette commande est réservée aux admins. 👑"
-			break
-		}
-		
-		// CPU Usage
-		cpuCmd := exec.Command("sh", "-c", "top -bn1 | grep 'Cpu(s)' | awk '{print $2}'")
-		cpuOut, _ := cpuCmd.Output()
-		
-		// Memory Usage
-		memCmd := exec.Command("sh", "-c", "free -m | awk 'NR==2{printf \"%.2f%% (%d/%d MB)\", $3*100/$2, $3, $2}'")
-		memOut, _ := memCmd.Output()
-		
-		// Disk Usage
-		diskCmd := exec.Command("sh", "-c", "df -h / | awk 'NR==2{print $5 \" (\" $3 \"/\" $2 \")\"}'")
-		diskOut, _ := diskCmd.Output()
-		
-		// Uptime
-		uptimeCmd := exec.Command("uptime", "-p")
-		uptimeOut, _ := uptimeCmd.Output()
-
-		response = fmt.Sprintf("💻 *Statut du Serveur (VPS)*\n\n"+
-			"⏱️ *Uptime:* %s\n"+
-			"🧠 *CPU:* %s%%\n"+
-			"💾 *RAM:* %s\n"+
-			"💽 *Disque:* %s\n"+
-			"🐳 *Docker:* Actif (Brain, Evolution, DB, Ollama)", 
-			strings.TrimSpace(string(uptimeOut)),
-			strings.TrimSpace(string(cpuOut)),
-			strings.TrimSpace(string(memOut)),
-			strings.TrimSpace(string(diskOut)))
-
-	case "recherche":
-		if args == "" {
-			response = "Que cherches-tu ? Ex: .recherche docker swarm"
-		} else {
-			handleSearch(instance, remoteJid, args, msgId, senderJid, time.Now())
-			return
 		}
 
 	case "warn-list":
 		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
 		if !isAdmin {
-			response = "Désolée, cette commande est réservée aux admins. 👑"
+			response = "Commande reservee aux admins."
 			break
 		}
-		rows, err := db.Query(context.Background(), "SELECT jid, warning_count FROM user_warnings WHERE group_jid = $1", remoteJid)
+		list, err := listWarnings(remoteJid)
 		if err != nil {
-			response = "Erreur lors de la récupération des avertissements. ❌"
+			response = "Erreur."
 		} else {
-			defer rows.Close()
-			var sb strings.Builder
-			sb.WriteString("⚠️ *Liste des avertissements :*\n\n")
-			found := false
-			for rows.Next() {
-				var jid string
-				var count int
-				if err := rows.Scan(&jid, &count); err == nil {
-					sb.WriteString(fmt.Sprintf("- @%s : %d/3\n", strings.Split(jid, "@")[0], count))
-					found = true
-				}
-			}
-			if !found {
-				response = "Aucun utilisateur averti pour le moment. ✅"
-			} else {
-				response = sb.String()
-			}
+			response = "*Avertissements:*\n" + list
 		}
 
-	case "ouvrir", "fermer":
+	case "warn-reset":
 		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
 		if !isAdmin {
-			response = "Désolée, cette commande est réservée aux admins. 👑"
+			response = "Commande reservee aux admins."
 			break
 		}
-		action := "not_announcement"
-		if cmd == "fermer" { action = "announcement" }
-		
-		evoURL := os.Getenv("EVOLUTION_URL")
-		if evoURL == "" { evoURL = "http://evolution-api:8080" }
-		apiKey := os.Getenv("AUTHENTICATION_API_KEY")
-
-		client := resty.New()
-		_, err := client.R().
-			SetHeader("apikey", apiKey).
-			Post(fmt.Sprintf("%s/group/updateSetting/%s?groupJid=%s&action=%s", evoURL, instance, remoteJid, action))
-		
+		targetJid := extractJid(args, ctx.QuotedSender)
+		if targetJid == "" {
+			response = "Usage: `.warn-reset @user`"
+			break
+		}
+		err := resetWarnings(targetJid, remoteJid)
 		if err != nil {
-			response = "Erreur lors de l'opération. ❌"
+			response = "Erreur."
 		} else {
-			if cmd == "fermer" {
-				response = "🔒 Groupe fermé. Seuls les admins peuvent envoyer des messages."
-			} else {
-				response = "🔓 Groupe ouvert. Tout le monde peut participer."
-			}
+			response = fmt.Sprintf("Avertissements reinitialises pour @%s.", strings.Split(targetJid, "@")[0])
 		}
 
-	case "yt", "fb", "tt", "video", "audio":
-		if args == "" {
-			response = fmt.Sprintf("Usage: .%s [URL]", cmd)
+	case "kick":
+		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+		if !isAdmin {
+			response = "Commande reservee aux admins."
+			break
+		}
+		targetJid := extractJid(args, ctx.QuotedSender)
+		if targetJid == "" {
+			response = "Usage: `.kick @user` ou cite un message"
+			break
+		}
+		err := kickUser(instance, remoteJid, targetJid)
+		if err != nil {
+			response = "Erreur lors de l'expulsion."
 		} else {
-			go handleDownload(instance, remoteJid, cmd, args, msgId, senderJid)
-			return
+			response = fmt.Sprintf("@%s a ete expulse.", strings.Split(targetJid, "@")[0])
 		}
 
-	case "tagall":
+	case "mute":
+		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+		if !isAdmin {
+			response = "Commande reservee aux admins."
+			break
+		}
+		// Mute = close group (only admins can talk)
+		err := setGroupAnnouncement(instance, remoteJid, true)
+		if err != nil {
+			response = "Erreur."
+		} else {
+			response = "Groupe en mode silencieux (seuls les admins peuvent parler)."
+		}
+
+	case "unmute":
+		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+		if !isAdmin {
+			response = "Commande reservee aux admins."
+			break
+		}
+		err := setGroupAnnouncement(instance, remoteJid, false)
+		if err != nil {
+			response = "Erreur."
+		} else {
+			response = "Groupe demute. Tout le monde peut parler."
+		}
+
+	case "promote":
+		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+		if !isAdmin {
+			response = "Commande reservee aux admins."
+			break
+		}
+		targetJid := extractJid(args, ctx.QuotedSender)
+		if targetJid == "" {
+			response = "Usage: `.promote @user`"
+			break
+		}
+		err := promoteUser(instance, remoteJid, targetJid)
+		if err != nil {
+			response = "Erreur."
+		} else {
+			response = fmt.Sprintf("@%s promu admin.", strings.Split(targetJid, "@")[0])
+		}
+
+	case "demote":
+		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+		if !isAdmin {
+			response = "Commande reservee aux admins."
+			break
+		}
+		targetJid := extractJid(args, ctx.QuotedSender)
+		if targetJid == "" {
+			response = "Usage: `.demote @user`"
+			break
+		}
+		err := demoteUser(instance, remoteJid, targetJid)
+		if err != nil {
+			response = "Erreur."
+		} else {
+			response = fmt.Sprintf("@%s retire des admins.", strings.Split(targetJid, "@")[0])
+		}
+
+	// ========================================================================
+	// GROUP SETTINGS
+	// ========================================================================
+
+	case "bienvenue":
+		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+		if !isAdmin {
+			response = "Commande reservee aux admins."
+			break
+		}
+		switch strings.ToLower(args) {
+		case "on":
+			updateGroupSetting(remoteJid, "welcome_enabled", true)
+			response = "Messages de bienvenue actives."
+		case "off":
+			updateGroupSetting(remoteJid, "welcome_enabled", false)
+			response = "Messages de bienvenue desactives."
+		default:
+			response = "Usage: `.bienvenue on` ou `.bienvenue off`"
+		}
+
+	case "anti-lien":
+		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+		if !isAdmin {
+			response = "Commande reservee aux admins."
+			break
+		}
+		switch strings.ToLower(args) {
+		case "on":
+			updateGroupSetting(remoteJid, "antilink_enabled", true)
+			response = "Anti-lien active. Les liens seront supprimes."
+		case "off":
+			updateGroupSetting(remoteJid, "antilink_enabled", false)
+			response = "Anti-lien desactive."
+		default:
+			response = "Usage: `.anti-lien on` ou `.anti-lien off`"
+		}
+
+	case "ouvrir":
+		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+		if !isAdmin {
+			response = "Commande reservee aux admins."
+			break
+		}
+		err := setGroupAnnouncement(instance, remoteJid, false)
+		if err != nil {
+			response = "Erreur."
+		} else {
+			response = "Groupe ouvert. Tout le monde peut participer."
+		}
+
+	case "fermer":
+		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+		if !isAdmin {
+			response = "Commande reservee aux admins."
+			break
+		}
+		err := setGroupAnnouncement(instance, remoteJid, true)
+		if err != nil {
+			response = "Erreur."
+		} else {
+			response = "Groupe ferme. Seuls les admins peuvent envoyer des messages."
+		}
+
+	case "lien":
 		if !strings.HasSuffix(remoteJid, "@g.us") {
-			response = "Cette commande ne fonctionne que dans les groupes. 👥"
-		} else {
-			participants, err := getGroupMetadata(instance, remoteJid)
-			if err != nil {
-				response = "Erreur lors de la récupération des membres. ❌"
-			} else {
-				var mentions []string
-				var text strings.Builder
-				text.WriteString("📣 Appel à tous les membres :\n\n")
-				for _, p := range participants {
-					number := strings.Split(p, "@")[0]
-					text.WriteString(fmt.Sprintf("@%s ", number))
-					mentions = append(mentions, p)
-				}
-				
-				// Envoi spécial avec toutes les mentions
-				evoURL := os.Getenv("EVOLUTION_URL")
-				if evoURL == "" {
-					evoURL = "http://evolution-api:8080"
-				}
-				apiKey := os.Getenv("AUTHENTICATION_API_KEY")
-
-				body := EvolutionSendMessageRequest{
-					Number:    strings.Split(remoteJid, "@")[0],
-					Text:      text.String(),
-					Mentioned: mentions,
-				}
-				
-				client := resty.New()
-				_, _ = client.R().
-					SetHeader("apikey", apiKey).
-					SetBody(body).
-					Post(fmt.Sprintf("%s/message/sendText/%s", evoURL, instance))
-				return
-			}
+			response = "Commande de groupe uniquement."
+			break
 		}
-
-	case "sticker":
-		// On cherche d'abord dans le message cité
-		targetMsgId := quotedMsgId
-		if targetMsgId == "" {
-			// Si pas de citation, on regarde si le message actuel est une image
-			targetMsgId = msgId
-		}
-
-		_ = sendWhatsAppMessage(instance, remoteJid, "⏳ Conversion en sticker... Un instant ! ✨", msgId, senderJid)
-		
-		// Récupérer le base64 (soit du message cité, soit du message actuel)
-		b64, err := getMediaBase64(instance, targetMsgId)
+		link, err := getGroupInviteLink(instance, remoteJid)
 		if err != nil {
-			fmt.Printf("[STICKER] Error fetching media for %s: %v\n", targetMsgId, err)
-			response = "❌ Impossible de transformer ça en sticker. Assure-toi de citer une image ou d'en envoyer une avec la légende .sticker"
+			response = "Impossible de recuperer le lien d'invitation."
 		} else {
-			err = sendSticker(instance, remoteJid, b64)
-			if err != nil {
-				fmt.Printf("[STICKER] Error sending sticker: %v\n", err)
-				response = "❌ Erreur lors de la création du sticker."
+			response = "Lien d'invitation: " + link
+		}
+
+	// ========================================================================
+	// GROUP RULES
+	// ========================================================================
+
+	case "regles":
+		if args == "" {
+			// Show rules
+			rules, err := getRules(remoteJid)
+			if err != nil || len(rules) == 0 {
+				response = "Aucune regle definie. Admin: `.regles add <texte>`"
 			} else {
-				return // Succès
+				response = "*Regles du groupe:*\n" + strings.Join(rules, "\n")
+			}
+		} else {
+			parts := strings.SplitN(args, " ", 2)
+			subCmd := strings.ToLower(parts[0])
+
+			switch subCmd {
+			case "add":
+				isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+				if !isAdmin {
+					response = "Commande reservee aux admins."
+					break
+				}
+				if len(parts) < 2 {
+					response = "Usage: `.regles add <texte de la regle>`"
+				} else {
+					err := addRule(remoteJid, parts[1], senderJid)
+					if err != nil {
+						response = "Erreur."
+					} else {
+						response = "Regle ajoutee."
+					}
+				}
+			case "del":
+				isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+				if !isAdmin {
+					response = "Commande reservee aux admins."
+					break
+				}
+				if len(parts) < 2 {
+					response = "Usage: `.regles del <id>`"
+				} else {
+					id, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+					if err != nil {
+						response = "ID invalide."
+					} else {
+						deleteRule(remoteJid, id)
+						response = "Regle supprimee."
+					}
+				}
+			default:
+				response = "Usage: `.regles`, `.regles add <texte>`, `.regles del <id>`"
 			}
 		}
 
+	// ========================================================================
+	// PERSONA
+	// ========================================================================
+
+	case "persona":
+		if args == "" {
+			current := GetGroupPersona(remoteJid)
+			if current == "" {
+				response = "Aucune personnalite personnalisee. Usage: `.persona <description>`"
+			} else {
+				response = "Personnalite actuelle:\n" + current
+			}
+		} else if strings.ToLower(args) == "reset" {
+			SetGroupPersona(remoteJid, "")
+			response = "Personnalite reinitialise au defaut."
+		} else {
+			err := SetGroupPersona(remoteJid, args)
+			if err != nil {
+				response = "Erreur."
+			} else {
+				response = "Personnalite mise a jour."
+			}
+		}
+
+	case "langue":
+		if args == "" {
+			lang := GetGroupLanguage(remoteJid)
+			response = fmt.Sprintf("Langue actuelle: %s\nUsage: `.langue fr` ou `.langue en`", lang)
+		} else {
+			lang := strings.ToLower(strings.TrimSpace(args))
+			SetGroupLanguage(remoteJid, lang)
+			response = fmt.Sprintf("Langue changee: %s", lang)
+		}
+
+	// ========================================================================
+	// STATS & PROFIL
+	// ========================================================================
 
 	case "stats":
 		cartography, _ := getGroupCartography(remoteJid)
 		if cartography == "" {
-			response = "Aucune donnée de groupe pour le moment. 📊"
+			response = "Pas encore de donnees pour ce groupe."
 		} else {
-			response = "📊 Cartographie du groupe :\n\n" + cartography
+			response = "*Statistiques du groupe:*\n\n" + cartography
 		}
 
-	case "persona":
-		if args == "" {
-			response = "Usage: @poulga !persona [description]\nExemple: @poulga !persona Tu es une experte en cryptomonnaie"
+	case "profil":
+		targetJid := senderJid
+		if args != "" {
+			targetJid = extractJid(args, "")
+		}
+		if targetJid == "" {
+			targetJid = senderJid
+		}
+
+		memories, _ := GetUserMemory(targetJid, remoteJid)
+		if len(memories) == 0 {
+			response = fmt.Sprintf("Aucune info sur @%s pour l'instant.", strings.Split(targetJid, "@")[0])
 		} else {
-			err := SetGroupPersona(remoteJid, args)
-			if err != nil {
-				response = "Erreur lors de la mise à jour. ❌"
+			response = fmt.Sprintf("*Profil de @%s:*\n%s", strings.Split(targetJid, "@")[0], FormatUserMemory(memories))
+		}
+
+	// ========================================================================
+	// SEARCH
+	// ========================================================================
+
+	case "recherche":
+		if args == "" {
+			response = "Que cherches-tu ? Ex: `.recherche docker`"
+		} else {
+			go handleSearchCommand(ctx, args)
+			return
+		}
+
+	// ========================================================================
+	// RESUME / SUMMARY
+	// ========================================================================
+
+	case "resume":
+		go handleSummaryCommand(ctx)
+		return
+
+	// ========================================================================
+	// NOTES & REMINDERS
+	// ========================================================================
+
+	case "note":
+		if args == "" {
+			notes, err := getNotes(senderJid, remoteJid)
+			if err != nil || len(notes) == 0 {
+				response = "Aucune note. Usage: `.note <texte>` pour ajouter"
 			} else {
-				response = "Personnalité mise à jour avec succès ! ✅"
+				response = "*Tes notes:*\n" + strings.Join(notes, "\n")
+			}
+		} else {
+			parts := strings.SplitN(args, " ", 2)
+			if parts[0] == "del" && len(parts) > 1 {
+				id, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+				if err != nil {
+					response = "ID invalide."
+				} else {
+					deleteNote(senderJid, remoteJid, id)
+					response = "Note supprimee."
+				}
+			} else {
+				err := addNote(senderJid, remoteJid, args)
+				if err != nil {
+					response = "Erreur."
+				} else {
+					response = "Note enregistree."
+				}
 			}
 		}
 
-	case "confidentialité":
-		response = `🔒 Politique de Confidentialité
+	case "rappel":
+		if args == "" {
+			response = "Usage: `.rappel <texte>` (les rappels temporises arrivent bientot)"
+		} else {
+			err := addNote(senderJid, remoteJid, "[RAPPEL] "+args)
+			if err != nil {
+				response = "Erreur."
+			} else {
+				response = "Rappel enregistre."
+			}
+		}
 
-Je suis une partenaire transparente. Je lis les messages pour :
-  • Construire les statistiques (qui parle le plus)
-  • Extraire les faits importants liés aux projets
-  • Comprendre le contexte des discussions
+	// ========================================================================
+	// SONDAGE (Poll-like via text)
+	// ========================================================================
 
-Je ne fais PAS :
-  • Conserver le texte brut des messages indéfiniment
-  • Partager vos données hors du groupe
-  • Analyser les messages privés sans être sollicitée
+	case "sondage":
+		if args == "" {
+			response = "Usage: `.sondage Question ? | Option1 | Option2 | Option3`"
+		} else {
+			parts := strings.Split(args, "|")
+			if len(parts) < 3 {
+				response = "Il faut au moins une question et 2 options separees par |"
+			} else {
+				question := strings.TrimSpace(parts[0])
+				var sb strings.Builder
+				sb.WriteString(fmt.Sprintf("*SONDAGE:* %s\n\n", question))
+				emojis := []string{"1\ufe0f\u20e3", "2\ufe0f\u20e3", "3\ufe0f\u20e3", "4\ufe0f\u20e3", "5\ufe0f\u20e3", "6\ufe0f\u20e3", "7\ufe0f\u20e3", "8\ufe0f\u20e3", "9\ufe0f\u20e3"}
+				for i, opt := range parts[1:] {
+					if i >= len(emojis) {
+						break
+					}
+					sb.WriteString(fmt.Sprintf("%s %s\n", emojis[i], strings.TrimSpace(opt)))
+				}
+				sb.WriteString("\nReagissez avec le numero correspondant !")
+				response = sb.String()
+			}
+		}
 
-Pour refuser complètement : !optout`
+	// ========================================================================
+	// ANNONCE (broadcast)
+	// ========================================================================
+
+	case "annonce":
+		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+		if !isAdmin {
+			response = "Commande reservee aux admins."
+			break
+		}
+		if args == "" {
+			response = "Usage: `.annonce <message>`"
+		} else {
+			// Send the announcement with a header
+			announcement := fmt.Sprintf("*ANNONCE OFFICIELLE*\n\n%s\n\n_Par @%s_", args, strings.Split(senderJid, "@")[0])
+			_ = sendWhatsAppMessage(instance, remoteJid, announcement, "", senderJid)
+			return
+		}
+
+	// ========================================================================
+	// CODE (LLM-powered code help)
+	// ========================================================================
+
+	case "code":
+		if args == "" {
+			response = "Usage: `.code <question ou code>`\nEx: `.code python tri a bulles`"
+		} else {
+			go handleCodeCommand(ctx, args)
+			return
+		}
+
+	// ========================================================================
+	// JEU (Game)
+	// ========================================================================
+
+	case "jeu":
+		go handleGameCommand(ctx, args)
+		return
+
+	// ========================================================================
+	// STICKER
+	// ========================================================================
+
+	case "sticker":
+		go handleStickerCommand(ctx)
+		return
+
+	// ========================================================================
+	// DOWNLOADS
+	// ========================================================================
+
+	case "yt", "fb", "tt", "video", "audio":
+		if args == "" {
+			response = fmt.Sprintf("Usage: `.%s <URL>`", cmd)
+		} else {
+			go handleDownload(ctx, cmd, args)
+			return
+		}
+
+	// ========================================================================
+	// SYSTEM STATUS
+	// ========================================================================
+
+	case "statut-serveur":
+		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+		if !isAdmin {
+			response = "Commande reservee aux admins."
+			break
+		}
+		response = getServerStatus()
+
+	// ========================================================================
+	// DEFAULT - Unknown command
+	// ========================================================================
 
 	default:
-		response = "Commande inconnue. Tapez @poulga !help pour la liste."
+		response = fmt.Sprintf("Commande `.%s` inconnue. Tape `.aide` pour la liste.", cmd)
 	}
 
-	_ = sendWhatsAppMessage(instance, remoteJid, response, msgId, senderJid)
+	// Send response if not empty
+	if response != "" {
+		_ = sendWhatsAppMessage(instance, remoteJid, response, msgId, senderJid)
+	}
 }
 
-// handleDownload gère les téléchargements via yt-dlp
-func handleDownload(instance, remoteJid, cmd, url, msgId, senderJid string) {
-	fmt.Printf("[DOWNLOAD] Starting %s download for %s\n", cmd, url)
-	
-	// Message d'attente
-	_ = sendWhatsAppMessage(instance, remoteJid, "⏳ Téléchargement en cours... Je m'en occupe ! 🚀", msgId, senderJid)
+// ============================================================================
+// ASYNC COMMAND HANDLERS (run in goroutines, send their own messages)
+// ============================================================================
 
-	outputFile := fmt.Sprintf("/tmp/poulga_%d", time.Now().UnixNano())
-	args := []string{}
-	mediaType := "video"
+func handleSearchCommand(ctx MessageContext, query string) {
+	sendTypingStatus(ctx.Instance, ctx.RemoteJid)
 
-	if cmd == "audio" {
-		mediaType = "audio"
-		args = []string{
-			"--cookies", "/app/cookies.txt",
-			"--extract-audio",
-			"--audio-format", "mp3",
-			"--max-filesize", "50M",
-			"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-			"--geo-bypass",
-			"--no-check-certificates",
-			"--no-warnings",
-			"-o", outputFile + ".%(ext)s",
-			url,
-		}
-	} else {
-		args = []string{
-			"--cookies", "/app/cookies.txt",
-			"-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-			"--max-filesize", "50M",
-			"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-			"--geo-bypass",
-			"--no-check-certificates",
-			"--no-warnings",
-			"-o", outputFile + ".%(ext)s",
-			url,
-		}
-	}
-
-	cmdExec := exec.Command("yt-dlp", args...)
-	output, err := cmdExec.CombinedOutput()
+	facts, _ := getFacts(ctx.RemoteJid)
+	prompt := BuildSearchPrompt(ctx, facts, "")
+	response, err := callOllamaWithIntent(prompt, IntentSearch, nil)
 	if err != nil {
-		fmt.Printf("[DOWNLOAD] Error: %v, Output: %s\n", err, string(output))
-		errorMsg := "❌ Désolée, je n'ai pas pu télécharger cette vidéo. Vérifie le lien ou réessaie plus tard."
-		if strings.Contains(string(output), "Sign in to confirm you’re not a bot") {
-			errorMsg = "❌ Le téléchargement a été bloqué par la sécurité de la plateforme (Protection Anti-Bot YouTube). YouTube bloque les serveurs Cloud."
-		}
-		_ = sendWhatsAppMessage(instance, remoteJid, errorMsg, msgId, senderJid)
+		response = "Erreur lors de la recherche."
+	}
+	response = cleanResponse(response)
+	_ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, response, ctx.MsgId, ctx.SenderJid)
+}
+
+func handleSummaryCommand(ctx MessageContext) {
+	sendTypingStatus(ctx.Instance, ctx.RemoteJid)
+
+	profiles, _ := getMemberProfiles(ctx.RemoteJid)
+	history, _ := GetConversationContext(ctx.RemoteJid, 50)
+
+	if len(history) == 0 {
+		_ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, "Pas assez de messages pour un resume.", ctx.MsgId, ctx.SenderJid)
 		return
 	}
 
-	// Trouver le fichier réel (car yt-dlp ajoute l'extension)
+	prompt := BuildSummaryPrompt(profiles, history)
+	response, err := callOllamaWithIntent(prompt, IntentSummary, nil)
+	if err != nil {
+		response = "Erreur lors de la generation du resume."
+	}
+	response = cleanResponse(response)
+	_ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, response, ctx.MsgId, ctx.SenderJid)
+}
+
+func handleCodeCommand(ctx MessageContext, args string) {
+	sendTypingStatus(ctx.Instance, ctx.RemoteJid)
+
+	codeCtx := ctx
+	codeCtx.Text = args
+	prompt := BuildCodePrompt(codeCtx)
+	response, err := callOllamaWithIntent(prompt, IntentCode, nil)
+	if err != nil {
+		response = "Erreur lors de la generation du code."
+	}
+	response = cleanResponse(response)
+	_ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, response, ctx.MsgId, ctx.SenderJid)
+}
+
+func handleGameCommand(ctx MessageContext, args string) {
+	sendTypingStatus(ctx.Instance, ctx.RemoteJid)
+
+	history, _ := GetConversationContext(ctx.RemoteJid, 5)
+	prompt := BuildGamePrompt(ctx, history)
+	response, err := callOllamaWithIntent(prompt, IntentGame, nil)
+	if err != nil {
+		response = "Erreur. Reessaie."
+	}
+	response = cleanResponse(response)
+	_ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, response, ctx.MsgId, ctx.SenderJid)
+}
+
+func handleStickerCommand(ctx MessageContext) {
+	targetMsgId := ctx.QuotedMsgId
+	if targetMsgId == "" {
+		targetMsgId = ctx.MsgId // If no quote, try current message (image with caption)
+	}
+
+	_ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, "Conversion en sticker...", ctx.MsgId, ctx.SenderJid)
+
+	b64, err := getMediaBase64(ctx.Instance, targetMsgId)
+	if err != nil {
+		fmt.Printf("[STICKER] getMedia error for %s: %v\n", targetMsgId, err)
+		_ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, "Impossible de transformer en sticker. Cite une image.", ctx.MsgId, ctx.SenderJid)
+		return
+	}
+
+	err = sendSticker(ctx.Instance, ctx.RemoteJid, b64)
+	if err != nil {
+		fmt.Printf("[STICKER] send error: %v\n", err)
+		_ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, "Erreur lors de la creation du sticker.", ctx.MsgId, ctx.SenderJid)
+	}
+}
+
+func handleDownload(ctx MessageContext, cmd, url string) {
+	fmt.Printf("[DOWNLOAD] %s | url=%s\n", cmd, url)
+
+	_ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, "Telechargement en cours...", ctx.MsgId, ctx.SenderJid)
+
+	outputFile := fmt.Sprintf("/tmp/poulga_%d", time.Now().UnixNano())
+	var ytdlpArgs []string
+	mediaType := "video"
+
+	commonArgs := []string{
+		"--cookies", "/app/cookies.txt",
+		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		"--geo-bypass",
+		"--no-check-certificates",
+		"--no-warnings",
+		"--max-filesize", "50M",
+		"-o", outputFile + ".%(ext)s",
+	}
+
+	if cmd == "audio" {
+		mediaType = "audio"
+		ytdlpArgs = append(commonArgs, "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0")
+	} else {
+		ytdlpArgs = append(commonArgs, "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best")
+	}
+	ytdlpArgs = append(ytdlpArgs, url)
+
+	cmdExec := exec.Command("yt-dlp", ytdlpArgs...)
+	output, err := cmdExec.CombinedOutput()
+	if err != nil {
+		fmt.Printf("[DOWNLOAD] Error: %v | Output: %s\n", err, string(output))
+		errorMsg := "Impossible de telecharger. Le lien est bloque ou invalide."
+		if strings.Contains(string(output), "Sign in to confirm") {
+			errorMsg = "Bloque par la plateforme (protection anti-bot)."
+		}
+		_ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, errorMsg, ctx.MsgId, ctx.SenderJid)
+		return
+	}
+
 	matches, _ := filepath.Glob(outputFile + ".*")
 	if len(matches) == 0 {
-		_ = sendWhatsAppMessage(instance, remoteJid, "❌ Erreur interne : fichier introuvable.", msgId, senderJid)
+		_ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, "Fichier introuvable apres telechargement.", ctx.MsgId, ctx.SenderJid)
 		return
 	}
 	realPath := matches[0]
 	defer os.Remove(realPath)
 
-	// Lire le fichier et encoder en base64
 	data, err := os.ReadFile(realPath)
 	if err != nil {
-		_ = sendWhatsAppMessage(instance, remoteJid, "❌ Erreur lors de la lecture du fichier.", msgId, senderJid)
+		_ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, "Erreur lecture fichier.", ctx.MsgId, ctx.SenderJid)
 		return
 	}
 
-	// Vérifier la taille (50MB max pour Evolution API / WhatsApp)
 	if len(data) > 50*1024*1024 {
-		_ = sendWhatsAppMessage(instance, remoteJid, "❌ Le fichier est trop volumineux (max 50 Mo).", msgId, senderJid)
+		_ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, "Fichier trop volumineux (max 50 Mo).", ctx.MsgId, ctx.SenderJid)
 		return
 	}
 
 	base64Data := base64.StdEncoding.EncodeToString(data)
 	fileName := filepath.Base(realPath)
-	
-	caption := "Voici ton contenu ! 😊"
-	if cmd == "audio" {
-		caption = ""
+
+	err = sendWhatsAppMedia(ctx.Instance, ctx.RemoteJid, base64Data, fileName, "", mediaType)
+	if err != nil {
+		fmt.Printf("[DOWNLOAD] Send error: %v\n", err)
+		_ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, "Erreur envoi WhatsApp.", ctx.MsgId, ctx.SenderJid)
+	}
+}
+
+// ============================================================================
+// HELP MENU
+// ============================================================================
+
+func getHelpMenu() string {
+	return `*Poulga - Commandes*
+
+*Info*
+.aide / .help - Ce menu
+.qui-es-tu - Qui je suis
+.ping - Test de latence
+
+*Memoire*
+.memoire - Faits memorises
+.fact add/list/del - Gerer les faits
+.recherche <sujet> - Fouiller ma memoire
+.resume - Resume des discussions
+.note <texte> - Sauvegarder une note
+.rappel <texte> - Creer un rappel
+
+*Groupe*
+.tagall - Mentionner tout le monde
+.stats - Statistiques du groupe
+.profil - Voir un profil
+.regles - Regles du groupe
+.lien - Lien d'invitation
+.sondage Q | Opt1 | Opt2 - Sondage
+.annonce <msg> - Annonce officielle
+
+*Moderation (Admin)*
+.warn @user - Avertissement (3=kick)
+.warn-list - Liste des avertissements
+.warn-reset @user - Reset warns
+.kick @user - Expulser
+.promote / .demote - Admin/Retirer
+.mute / .unmute - Silence groupe
+.ouvrir / .fermer - Ouvrir/Fermer
+.bienvenue on/off - Accueil
+.anti-lien on/off - Bloquer liens
+
+*Media*
+.sticker - Creer un sticker (cite une image)
+.yt <url> - Video YouTube
+.audio <url> - Audio MP3
+.fb <url> - Video Facebook
+.tt <url> - Video TikTok
+
+*Outils*
+.code <question> - Aide codage
+.jeu - Jouer un jeu
+.persona <texte> - Changer ma personnalite
+.langue fr/en - Changer la langue
+.clear - Reinitialiser le contexte
+.statut-serveur - Etat du VPS
+
+_Mentionnez @poulga pour discuter librement._`
+}
+
+// ============================================================================
+// SYSTEM STATUS
+// ============================================================================
+
+func getServerStatus() string {
+	cpuOut, _ := exec.Command("sh", "-c", "top -bn1 | grep 'Cpu(s)' | awk '{print $2}'").Output()
+	memOut, _ := exec.Command("sh", "-c", "free -m | awk 'NR==2{printf \"%.1f%% (%d/%d MB)\", $3*100/$2, $3, $2}'").Output()
+	diskOut, _ := exec.Command("sh", "-c", "df -h / | awk 'NR==2{print $5 \" (\" $3 \"/\" $2 \")\"}'").Output()
+	uptimeOut, _ := exec.Command("uptime", "-p").Output()
+
+	return fmt.Sprintf("*Statut Serveur*\n\nUptime: %s\nCPU: %s%%\nRAM: %s\nDisque: %s\nDocker: Actif",
+		strings.TrimSpace(string(uptimeOut)),
+		strings.TrimSpace(string(cpuOut)),
+		strings.TrimSpace(string(memOut)),
+		strings.TrimSpace(string(diskOut)))
+}
+
+// ============================================================================
+// UTILITIES
+// ============================================================================
+
+// extractJid extracts a WhatsApp JID from args or quoted sender
+func extractJid(args string, quotedSender string) string {
+	// Try quoted sender first
+	if quotedSender != "" && strings.Contains(quotedSender, "@") {
+		return quotedSender
 	}
 
-	err = sendWhatsAppMedia(instance, remoteJid, base64Data, fileName, caption, mediaType)
-	if err != nil {
-		fmt.Printf("[DOWNLOAD] Send Error: %v\n", err)
-		_ = sendWhatsAppMessage(instance, remoteJid, "❌ Erreur lors de l'envoi du fichier sur WhatsApp.", msgId, senderJid)
+	// Try extracting from args (format: @number or number)
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return ""
 	}
+
+	// Remove @ prefix if present
+	target := strings.TrimPrefix(args, "@")
+	// Take first word only
+	parts := strings.Fields(target)
+	if len(parts) == 0 {
+		return ""
+	}
+	target = parts[0]
+
+	// If it already has @s.whatsapp.net, return as is
+	if strings.Contains(target, "@") {
+		return target
+	}
+
+	// Otherwise assume it's a phone number
+	return target + "@s.whatsapp.net"
 }

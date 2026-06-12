@@ -25,13 +25,14 @@ func initRedis() error {
 	return rdb.Ping(context.Background()).Err()
 }
 
+// ============================================================================
+// GROUP PERSONA (custom personality per group)
+// ============================================================================
 
-// SetGroupPersona sauvegarde un persona personnalisé pour un groupe
 func SetGroupPersona(jid, persona string) error {
 	return rdb.Set(context.Background(), "persona:"+jid, persona, 0).Err()
 }
 
-// GetGroupPersona récupère le persona personnalisé d'un groupe
 func GetGroupPersona(jid string) string {
 	val, err := rdb.Get(context.Background(), "persona:"+jid).Result()
 	if err != nil {
@@ -40,14 +41,69 @@ func GetGroupPersona(jid string) string {
 	return val
 }
 
-// IsDuplicateMessage vérifie si le message a déjà été traité (TTL 10 min)
+// ============================================================================
+// DEDUPLICATION (prevent processing same message twice)
+// ============================================================================
+
 func IsDuplicateMessage(msgId string) bool {
 	key := "processed:" + msgId
 	val, _ := rdb.Get(context.Background(), key).Result()
 	if val != "" {
 		return true
 	}
-	// On marque comme traité
 	rdb.Set(context.Background(), key, "1", 10*time.Minute)
 	return false
+}
+
+// ============================================================================
+// RATE LIMITING (prevent spam / abuse)
+// ============================================================================
+
+// CheckRateLimit returns true if the user is rate-limited
+func CheckRateLimit(senderJid string, maxPerMinute int) bool {
+	key := "ratelimit:" + senderJid
+	ctx := context.Background()
+
+	count, _ := rdb.Incr(ctx, key).Result()
+	if count == 1 {
+		rdb.Expire(ctx, key, 60*time.Second)
+	}
+
+	return count > int64(maxPerMinute)
+}
+
+// ============================================================================
+// TYPING LOCK (prevent multiple LLM calls for same user)
+// ============================================================================
+
+func AcquireTypingLock(remoteJid, senderJid string) bool {
+	key := "typing:" + remoteJid + ":" + senderJid
+	ctx := context.Background()
+
+	set, err := rdb.SetNX(ctx, key, "1", 120*time.Second).Result()
+	if err != nil {
+		return true // On error, allow
+	}
+	return set
+}
+
+func ReleaseTypingLock(remoteJid, senderJid string) {
+	key := "typing:" + remoteJid + ":" + senderJid
+	rdb.Del(context.Background(), key)
+}
+
+// ============================================================================
+// LANGUAGE PREFERENCE (per group)
+// ============================================================================
+
+func SetGroupLanguage(jid, lang string) error {
+	return rdb.Set(context.Background(), "lang:"+jid, lang, 0).Err()
+}
+
+func GetGroupLanguage(jid string) string {
+	val, err := rdb.Get(context.Background(), "lang:"+jid).Result()
+	if err != nil {
+		return "fr" // Default: French
+	}
+	return val
 }

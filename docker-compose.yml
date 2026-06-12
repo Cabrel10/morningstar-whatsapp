@@ -1,6 +1,6 @@
 services:
   db:
-    image: pgvector/pgvector:pg15 # Reverted to pg15 to match existing data directory
+    image: pgvector/pgvector:pg15
     restart: always
     environment:
       POSTGRES_USER: whatsapp
@@ -85,11 +85,15 @@ services:
       - "3001:3000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    environment:
+      - REDIS_URI=redis://redis:6379
     env_file: .env
     volumes:
-      - ./media:/app/media # Mounted for media archiving
+      - ./media:/app/media
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       evolution-api:
         condition: service_started

@@ -25,6 +25,8 @@ RUN apk add --no-cache \
     && chmod a+rx /usr/local/bin/yt-dlp
 
 COPY --from=builder /app/morningstar-brain .
+
+# Copy cookies if they exist (for yt-dlp YouTube auth)
 COPY cookies.txt /app/cookies.txt
 
 EXPOSE 3000

@@ -1,49 +1,241 @@
 package main
 
-const PersonaPrompt = `Tu es Poulga, une assistante du groupe. Tu aides les membres, tu réponds aux questions, tu racontes des histoires, tu proposes des jeux, tu donnes des conseils.
-Tu as accès aux faits mémorisés et à l'historique récent.
-Sois naturelle, brève mais complète. N'hésite pas à être un peu impertinente ou drôle.
-Ne te présente jamais. Réponds directement à la demande.
+import (
+	"fmt"
+	"strings"
+)
 
-Faits utiles : %s
-Derniers messages :
-%s
+// ============================================================================
+// SYSTEM PROMPT - The core identity. Minimal. No fluff.
+// This is injected ONCE at the top of every LLM call.
+// ============================================================================
 
-Utilisateur : %s
-Réponse :`
+const SystemPrompt = `Tu es Poulga. Assistante intelligente d'un groupe WhatsApp.
+REGLES STRICTES:
+- Ne te presente JAMAIS. Ne dis JAMAIS "Je suis Poulga" ou "En tant que Poulga".
+- Reponds directement a la question ou au sujet.
+- Sois naturelle, breve mais complete.
+- Tu peux etre drole, impertinente ou sarcastique si le contexte s'y prete.
+- Si on te cite un message, reponds a CE message, pas au contexte general.
+- Si on te demande du code, donne du code propre et fonctionnel.
+- Utilise le francais courant (pas academique).`
 
-const GamePrompt = `Tu joues au %s avec l'utilisateur.
-RÈGLES :
-1. Tu ne parles QUE du jeu.
-2. Tu ne mentions JAMAIS le groupe, les projets, ou ta mémoire.
-3. Tu ne te présentes JAMAIS.
-4. Réponse courte et directe.
+// ============================================================================
+// PROMPT BUILDERS - structured prompts per intent
+// ============================================================================
 
-État du jeu : %s
-Discussion :
-%s
+// BuildChatPrompt creates the complete prompt for general chat
+func BuildChatPrompt(ctx MessageContext, history []ConversationMessage, userMem []UserMemory, groupMem []GroupMemoryEntry, facts []string, summary string, customPersona string) string {
+	var sb strings.Builder
 
-Réponse :`
+	// 1. System identity
+	if customPersona != "" {
+		sb.WriteString(customPersona)
+	} else {
+		sb.WriteString(SystemPrompt)
+	}
+	sb.WriteString("\n\n")
 
-const SearchPrompt = `Tu aides à retrouver une information dans la mémoire du groupe.
-Voici les souvenirs pertinents :
-%s
+	// 2. Group knowledge (Level 3)
+	groupMemStr := FormatGroupMemory(groupMem)
+	if groupMemStr != "" {
+		sb.WriteString("CONNAISSANCES DU GROUPE:\n")
+		sb.WriteString(groupMemStr)
+		sb.WriteString("\n")
+	}
 
-Question : %s
+	// 3. User knowledge (Level 1)
+	userMemStr := FormatUserMemory(userMem)
+	if userMemStr != "" {
+		sb.WriteString(fmt.Sprintf("CE QUE TU SAIS SUR %s:\n", ctx.PushName))
+		sb.WriteString(userMemStr)
+		sb.WriteString("\n")
+	}
 
-Réponds de manière concise.`
+	// 4. Conversation summary (Level 4)
+	if summary != "" {
+		sb.WriteString("RESUME DES DISCUSSIONS RECENTES:\n")
+		sb.WriteString(summary)
+		sb.WriteString("\n\n")
+	}
 
-const SummaryPrompt = `Tu es Poulga. Génère un résumé bienveillant et intelligent.
+	// 5. Facts
+	if len(facts) > 0 {
+		sb.WriteString("FAITS IMPORTANTS:\n")
+		for _, f := range facts {
+			sb.WriteString("- " + f + "\n")
+		}
+		sb.WriteString("\n")
+	}
 
-Profils des membres :
-%s
+	// 6. Recent conversation (Level 2) - last 8 messages
+	historyStr := FormatConversationHistory(history)
+	if historyStr != "(pas de messages recents)" {
+		sb.WriteString("MESSAGES RECENTS:\n")
+		sb.WriteString(historyStr)
+		sb.WriteString("\n")
+	}
 
-Messages de la période :
-%s
+	// 7. Quoted message (reply context)
+	if ctx.QuotedText != "" {
+		quotedAuthor := "quelqu'un"
+		if ctx.QuotedSender != "" {
+			quotedAuthor = strings.Split(ctx.QuotedSender, "@")[0]
+		}
+		sb.WriteString(fmt.Sprintf("MESSAGE CITE (de %s):\n\"%s\"\n\n", quotedAuthor, ctx.QuotedText))
+	}
 
-Résumé :`
+	// 8. Current message
+	sb.WriteString(fmt.Sprintf("%s dit: %s\n\nReponds:", ctx.PushName, ctx.Text))
 
-const FactExtractionPrompt = `Analyse les messages et extrais uniquement les faits majeurs (un par ligne). Si rien d'important, réponds "NONE".
+	return sb.String()
+}
 
-Messages:
-%s`
+// BuildQuestionPrompt creates a focused prompt for questions
+func BuildQuestionPrompt(ctx MessageContext, history []ConversationMessage, facts []string) string {
+	var sb strings.Builder
+
+	sb.WriteString(SystemPrompt)
+	sb.WriteString("\n\nTu reponds a une QUESTION. Sois precis et factuel.\n\n")
+
+	if len(facts) > 0 {
+		sb.WriteString("Faits connus:\n")
+		for _, f := range facts {
+			sb.WriteString("- " + f + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	historyStr := FormatConversationHistory(history)
+	if historyStr != "(pas de messages recents)" {
+		sb.WriteString("Contexte recent:\n")
+		sb.WriteString(historyStr)
+		sb.WriteString("\n")
+	}
+
+	if ctx.QuotedText != "" {
+		sb.WriteString(fmt.Sprintf("En reponse a: \"%s\"\n\n", ctx.QuotedText))
+	}
+
+	sb.WriteString(fmt.Sprintf("Question de %s: %s\n\nReponds:", ctx.PushName, ctx.Text))
+
+	return sb.String()
+}
+
+// BuildStoryPrompt creates a creative prompt
+func BuildStoryPrompt(ctx MessageContext) string {
+	var sb strings.Builder
+
+	sb.WriteString("Tu es un conteur talentueux. Raconte une histoire captivante.\n")
+	sb.WriteString("REGLES:\n")
+	sb.WriteString("- Histoire courte (max 300 mots)\n")
+	sb.WriteString("- Avec un debut, un milieu et une fin\n")
+	sb.WriteString("- En francais naturel\n")
+	sb.WriteString("- Ne te presente pas, commence directement l'histoire\n\n")
+
+	sb.WriteString(fmt.Sprintf("Demande de %s: %s\n\nHistoire:", ctx.PushName, ctx.Text))
+
+	return sb.String()
+}
+
+// BuildCodePrompt creates a technical prompt
+func BuildCodePrompt(ctx MessageContext) string {
+	var sb strings.Builder
+
+	sb.WriteString("Tu es un expert en programmation. Reponds avec du code propre et fonctionnel.\n")
+	sb.WriteString("REGLES:\n")
+	sb.WriteString("- Donne du code complet et executable\n")
+	sb.WriteString("- Ajoute des commentaires explicatifs\n")
+	sb.WriteString("- Si le langage n'est pas precise, utilise Python\n")
+	sb.WriteString("- Pas d'introduction inutile, va droit au code\n\n")
+
+	if ctx.QuotedText != "" {
+		sb.WriteString(fmt.Sprintf("Code cite:\n```\n%s\n```\n\n", ctx.QuotedText))
+	}
+
+	sb.WriteString(fmt.Sprintf("Demande: %s\n\nCode:", ctx.Text))
+
+	return sb.String()
+}
+
+// BuildGamePrompt creates a game interaction prompt
+func BuildGamePrompt(ctx MessageContext, history []ConversationMessage) string {
+	var sb strings.Builder
+
+	sb.WriteString("Tu animes un jeu interactif dans un groupe WhatsApp.\n")
+	sb.WriteString("REGLES:\n")
+	sb.WriteString("- Reste dans le jeu, ne parle de rien d'autre\n")
+	sb.WriteString("- Reponse courte et ludique\n")
+	sb.WriteString("- Si c'est un morpion, dessine la grille avec des emojis\n")
+	sb.WriteString("- Si c'est une devinette, pose-la clairement\n\n")
+
+	historyStr := FormatConversationHistory(history)
+	if historyStr != "(pas de messages recents)" {
+		sb.WriteString("Deroulement:\n")
+		sb.WriteString(historyStr)
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(fmt.Sprintf("%s: %s\n\nTon tour:", ctx.PushName, ctx.Text))
+
+	return sb.String()
+}
+
+// BuildSearchPrompt creates a memory search prompt
+func BuildSearchPrompt(ctx MessageContext, facts []string, searchResults string) string {
+	var sb strings.Builder
+
+	sb.WriteString("Tu aides a retrouver une information dans la memoire du groupe.\n")
+	sb.WriteString("Reponds de maniere concise et precise.\n\n")
+
+	if len(facts) > 0 {
+		sb.WriteString("Faits memorises:\n")
+		for _, f := range facts {
+			sb.WriteString("- " + f + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	if searchResults != "" {
+		sb.WriteString("Resultats de recherche:\n")
+		sb.WriteString(searchResults)
+		sb.WriteString("\n\n")
+	}
+
+	sb.WriteString(fmt.Sprintf("Recherche de %s: %s\n\nResultat:", ctx.PushName, ctx.Text))
+
+	return sb.String()
+}
+
+// BuildSummaryPrompt creates a summary prompt
+func BuildSummaryPrompt(profiles string, history []ConversationMessage) string {
+	var sb strings.Builder
+
+	sb.WriteString("Genere un resume clair et structure des discussions recentes.\n")
+	sb.WriteString("REGLES:\n")
+	sb.WriteString("- Identifie les sujets principaux\n")
+	sb.WriteString("- Mentionne qui a dit quoi d'important\n")
+	sb.WriteString("- Sois factuel, pas de flatterie\n")
+	sb.WriteString("- Max 200 mots\n\n")
+
+	if profiles != "" {
+		sb.WriteString("Membres actifs:\n")
+		sb.WriteString(profiles)
+		sb.WriteString("\n\n")
+	}
+
+	sb.WriteString("Messages:\n")
+	sb.WriteString(FormatConversationHistory(history))
+	sb.WriteString("\n\nResume:")
+
+	return sb.String()
+}
+
+// BuildGreetingPrompt creates a lightweight greeting response
+func BuildGreetingPrompt(ctx MessageContext) string {
+	return fmt.Sprintf(`Reponds brievement et chaleureusement a ce message. Max 1-2 phrases. Pas de presentation.
+
+%s dit: %s
+
+Reponse:`, ctx.PushName, ctx.Text)
+}

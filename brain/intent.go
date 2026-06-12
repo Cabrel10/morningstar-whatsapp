@@ -1,167 +1,249 @@
 package main
 
 import (
-	"fmt"
 	"strings"
 )
+
+// ============================================================================
+// INTENT TYPES
+// ============================================================================
 
 type Intent string
 
 const (
-	IntentGreeting Intent = "greeting"
-	IntentGame     Intent = "game"
-	IntentQuestion Intent = "question"
-	IntentSearch   Intent = "search"
-	IntentSummary  Intent = "summary"
-	IntentChat     Intent = "chat"
+	IntentCommand  Intent = "command"   // .xxx or !xxx
+	IntentChat     Intent = "chat"      // General conversation with LLM
+	IntentQuestion Intent = "question"  // Question directed at bot
+	IntentStory    Intent = "story"     // Storytelling request
+	IntentCode     Intent = "code"      // Code/programming help
+	IntentGame     Intent = "game"      // Game request
+	IntentSearch   Intent = "search"    // Memory/search request
+	IntentSummary  Intent = "summary"   // Summary request
+	IntentGreeting Intent = "greeting"  // Simple greeting
+	IntentIgnore   Intent = "ignore"    // Bot should not respond
 )
 
-// Fast replies codées - pas de LLM
-var fastReplies = map[string]string{
-	"bonjour": "Bonjour 👋",
-	"salut":   "Salut 😊",
-	"merci":   "Avec plaisir 😊",
-	"ok":      "D'accord 👍",
-	"oui":     "Oui, c'est bon 👍",
-	"non":     "Non, ça me convient pas",
-	"a+":      "À bientôt 👋",
-	"coucou":  "Coucou! 😊",
-	"ca va?":  "Ça va bien, et toi? 😊",
-	"ça va?":  "Ça va bien, et toi? 😊",
-	"thanks":  "You're welcome 😊",
-	"👍":      "👍",
-	"😂":      "😂",
-	"❤️":      "❤️",
+// ============================================================================
+// COMMAND REGISTRY - exhaustive list of all valid commands
+// Each command maps to its canonical name for the handler switch
+// ============================================================================
+
+var commandAliases = map[string]string{
+	// Help
+	"help": "help", "aide": "help", "menu": "help",
+	// Identity
+	"qui-es-tu": "qui-es-tu", "qui": "qui-es-tu",
+	// Ping
+	"ping": "ping",
+	// Tag all
+	"tagall": "tagall", "tous": "tagall",
+	// Sticker
+	"sticker": "sticker", "s": "sticker",
+	// Stats
+	"stats": "stats", "statistiques": "stats",
+	// Memory / Facts
+	"memoire": "memoire", "m\u00e9moire": "memoire",
+	"fact": "fact", "fait": "fact",
+	// Summary
+	"resume": "resume", "r\u00e9sum\u00e9": "resume",
+	// Persona
+	"persona": "persona", "personnalit\u00e9": "persona", "personnalite": "persona",
+	// Moderation
+	"warn": "warn",
+	"warn-list": "warn-list", "avertissements": "warn-list",
+	"warn-reset": "warn-reset",
+	"kick": "kick",
+	"mute": "mute", "unmute": "unmute",
+	// Group management
+	"bienvenue": "bienvenue",
+	"anti-lien": "anti-lien",
+	"ouvrir": "ouvrir", "fermer": "fermer",
+	// Download
+	"yt": "yt", "youtube": "yt",
+	"fb": "fb", "facebook": "fb",
+	"tt": "tt", "tiktok": "tt",
+	"audio": "audio",
+	"video": "video", "vid\u00e9o": "video",
+	// Search
+	"recherche": "recherche", "search": "recherche",
+	// Code
+	"code": "code",
+	// System
+	"statut-serveur": "statut-serveur", "serveur": "statut-serveur",
+	// Privacy
+	"confidentialit\u00e9": "confidentialite", "confidentialite": "confidentialite", "privacy": "confidentialite",
+	// Clear context
+	"clear": "clear", "reset": "clear",
+	// Jeu
+	"jeu": "jeu", "jouer": "jeu", "morpion": "jeu", "devinette": "jeu",
+	// Note/Rappel
+	"note": "note", "rappel": "rappel",
+	// Sondage
+	"sondage": "sondage", "poll": "sondage",
+	// Profil
+	"profil": "profil",
+	// Langue
+	"langue": "langue", "lang": "langue",
+	// Regles
+	"regles": "regles", "r\u00e8gles": "regles", "rules": "regles",
+	// Lien groupe
+	"lien": "lien", "link": "lien",
+	// Promote/Demote
+	"promote": "promote", "demote": "demote",
+	// Annonce
+	"annonce": "annonce", "broadcast": "annonce",
 }
 
-// DetectIntent analyse rapidement le message
-func DetectIntent(text string) Intent {
-	lower := strings.ToLower(strings.TrimSpace(text))
+// ============================================================================
+// COMMAND PARSING - strict prefix-based detection
+// ============================================================================
 
-	// Retirer la mention @poulga
-	lower = strings.ReplaceAll(lower, "@poulga", "")
-	lower = strings.TrimSpace(lower)
-
-	// Jeux
-	if strings.Contains(lower, "morpion") || strings.Contains(lower, "tic tac toe") ||
-		strings.Contains(lower, "echecs") || strings.Contains(lower, "devinette") ||
-		strings.Contains(lower, "jouons") || strings.Contains(lower, "joue avec moi") {
-		return IntentGame
-	}
-
-	// Résumé
-	if strings.Contains(lower, "resume") || strings.Contains(lower, "résumé") ||
-		strings.Contains(lower, "synthese") || strings.Contains(lower, "synthèse") ||
-		strings.Contains(lower, "recap") || strings.Contains(lower, "recapitulatif") {
-		return IntentSummary
-	}
-
-	// Recherche
-	if strings.Contains(lower, "qui a dit") || strings.Contains(lower, "rappelle-moi") ||
-		strings.Contains(lower, "qu'est-ce qu'on a dit") || strings.Contains(lower, "trouve-moi") ||
-		strings.Contains(lower, "cherche") {
-		return IntentSearch
-	}
-
-	// Salutations simples
-	if lower == "bonjour" || lower == "salut" || lower == "coucou" ||
-		lower == "hi" || lower == "hello" || lower == "a+" || lower == "au revoir" {
-		return IntentGreeting
-	}
-
-	// Remerciements simples
-	if lower == "merci" || lower == "thanks" || lower == "thx" || lower == "ok" ||
-		lower == "oui" || lower == "non" || lower == "ça va?" || lower == "ca va?" {
-		return IntentGreeting
-	}
-
-	// Emoji seuls
-	if len(lower) <= 3 && (strings.Contains(lower, "👍") || strings.Contains(lower, "😂") ||
-		strings.Contains(lower, "❤️") || strings.Contains(lower, "😊") || strings.Contains(lower, "🙏")) {
-		return IntentGreeting
-	}
-
-	// Défaut : chat normal
-	return IntentChat
-}
-
-// IsFastReply vérifie si c'est une réponse codée rapide
-func IsFastReply(text string) (string, bool) {
-	cleanText := strings.ToLower(strings.TrimSpace(text))
-	// Retirer la mention pour ne garder que l'intention
-	cleanText = strings.ReplaceAll(cleanText, "@poulga", "")
-	cleanText = strings.TrimSpace(cleanText)
-
-	fastReplies := map[string]string{
-		"bonjour":  "Coucou ! 😊",
-		"salut":    "Salut ! 👋",
-		"merci":    "Avec grand plaisir ! ✨",
-		"ok":       "Ça marche ! 👍",
-		"ping":     "Pong ! 🏓",
-	}
-
-	if reply, exists := fastReplies[cleanText]; exists {
-		return reply, true
-	}
-	return "", false
-}
-
-// IsShortMessage vérifie si le message est trop court pour faire des embeddings
-func IsShortMessage(text string) bool {
-	return len(strings.TrimSpace(text)) < 20
-}
-
-
-// IsCommand détecte les commandes avec ou sans ! ou .
-func IsCommand(text string) (string, string, bool) {
-	fmt.Printf("[DEBUG] IS_COMMAND_INPUT=%s\n", text)
+// ParseCommand checks if text is a command (starts with . or !)
+// Returns: canonical command name, arguments, isCommand
+func ParseCommand(text string) (string, string, bool) {
 	clean := strings.TrimSpace(text)
 	if clean == "" {
 		return "", "", false
 	}
 
-	lower := strings.ToLower(clean)
-
-	// Commandes avec préfixes . ou ! (Priorité)
-	if strings.HasPrefix(lower, "!") || strings.HasPrefix(lower, ".") {
-		parts := strings.Fields(clean)
-		if len(parts) == 0 {
-			return "", "", false
-		}
-		// On retire le préfixe de la première partie
-		cmd := strings.ToLower(parts[0][1:])
-		args := ""
-		if len(parts) > 1 {
-			args = strings.TrimSpace(clean[len(parts[0]):])
-		}
-		fmt.Printf("[DEBUG] IS_COMMAND_RESULT=true PREFIXED CMD=%s ARGS=%s\n", cmd, args)
-		return cmd, args, true
+	// STRICT RULE: Commands MUST start with . or !
+	if clean[0] != '.' && clean[0] != '!' {
+		return "", "", false
 	}
 
-	// Commandes sans préfixe (help, stats, persona, etc.)
-	commands := []string{
-		"aide", "help", "menu", "qui-es-tu", "qui", "mémoire", "résumé", "resume", "stats", "statistiques",
-		"persona", "personnalité", "confidentialité", "privacy",
-		"ping", "pong", "tagall", "mentionner", "sticker",
-		"ouvrir", "open", "fermer", "close",
-		"avertir", "warn", "avertissements", "warnings", "warn-list", "warn-reset", "reset",
-		"bienvenue", "anti-lien", "anti-spam", "anti-suppression",
-		"yt", "fb", "tt", "video", "vidéo", "audio", "télécharger", "download", "miniature", "thumbnail", "infos", "info",
-		"recherche", "search", "code", "explique", "explain", "débogue", "debug",
-		"statut-serveur", "server-status", "logs", "docker", "fait", "fact",
+	// Remove prefix
+	withoutPrefix := clean[1:]
+	if withoutPrefix == "" {
+		return "", "", false
 	}
-	for _, cmd := range commands {
-		if lower == cmd { // Match exact pour commande sans préfixe
-			fmt.Printf("[DEBUG] IS_COMMAND_RESULT=true EXACT CMD=%s\n", cmd)
-			return cmd, "", true
-		}
-		if strings.HasPrefix(lower, cmd+" ") { // Match avec arguments
-			args := strings.TrimSpace(clean[len(cmd):])
-			fmt.Printf("[DEBUG] IS_COMMAND_RESULT=true BARE CMD=%s ARGS=%s\n", cmd, args)
-			return cmd, args, true
+
+	// Split into command and args
+	parts := strings.SplitN(withoutPrefix, " ", 2)
+	rawCmd := strings.ToLower(strings.TrimSpace(parts[0]))
+	args := ""
+	if len(parts) > 1 {
+		args = strings.TrimSpace(parts[1])
+	}
+
+	// Look up canonical command name
+	canonical, exists := commandAliases[rawCmd]
+	if !exists {
+		return rawCmd, args, true // Unknown command - still a command, handler will say "unknown"
+	}
+
+	return canonical, args, true
+}
+
+// ============================================================================
+// INTENT DETECTION - for LLM routing (non-command messages)
+// ============================================================================
+
+// DetectIntent analyzes a non-command message and determines the best intent
+// This is ONLY called when the bot should respond (mentioned, reply, private)
+func DetectIntent(text string, isMentioned bool, isReplyToBot bool) Intent {
+	lower := strings.ToLower(strings.TrimSpace(text))
+
+	// Empty message after cleaning
+	if lower == "" {
+		return IntentGreeting
+	}
+
+	// Single emoji or very short reaction
+	if len([]rune(lower)) <= 2 {
+		return IntentGreeting
+	}
+
+	// Story/narrative request
+	storyKeywords := []string{"raconte", "histoire", "conte", "fable", "invente", "imagine"}
+	for _, kw := range storyKeywords {
+		if strings.Contains(lower, kw) {
+			return IntentStory
 		}
 	}
 
-	fmt.Printf("[DEBUG] IS_COMMAND_RESULT=false\n")
-	return "", "", false
+	// Game request
+	gameKeywords := []string{"jouons", "joue avec moi", "morpion", "tic tac toe",
+		"devinette", "enigme", "quiz", "devine"}
+	for _, kw := range gameKeywords {
+		if strings.Contains(lower, kw) {
+			return IntentGame
+		}
+	}
+
+	// Summary request
+	summaryKeywords := []string{"resume", "r\u00e9sum\u00e9", "synth\u00e8se", "synthese", "recap", "r\u00e9capitulatif"}
+	for _, kw := range summaryKeywords {
+		if strings.Contains(lower, kw) {
+			return IntentSummary
+		}
+	}
+
+	// Search/memory request
+	searchKeywords := []string{"qui a dit", "rappelle-moi", "qu'est-ce qu'on a dit",
+		"trouve-moi", "cherche", "tu te souviens", "souviens-toi"}
+	for _, kw := range searchKeywords {
+		if strings.Contains(lower, kw) {
+			return IntentSearch
+		}
+	}
+
+	// Code/programming request
+	codeKeywords := []string{"code", "programme", "script", "fonction", "variable",
+		"python", "javascript", "golang", "html", "css", "sql", "api",
+		"d\u00e9bogue", "debug", "erreur de code", "compile"}
+	for _, kw := range codeKeywords {
+		if strings.Contains(lower, kw) {
+			return IntentCode
+		}
+	}
+
+	// Question detection (contains ?)
+	if strings.Contains(lower, "?") {
+		return IntentQuestion
+	}
+
+	// Question patterns in French
+	questionPrefixes := []string{"qui ", "que ", "quoi ", "quel ", "quelle ",
+		"quand ", "o\u00f9 ", "ou ", "comment ", "pourquoi ", "combien ",
+		"est-ce que", "c'est quoi", "qu'est-ce"}
+	for _, prefix := range questionPrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return IntentQuestion
+		}
+	}
+
+	// Simple greeting (exact match only)
+	greetings := map[string]bool{
+		"bonjour": true, "salut": true, "coucou": true,
+		"hi": true, "hello": true, "hey": true,
+		"bonsoir": true, "yo": true, "wesh": true,
+		"a+": true, "au revoir": true, "bye": true,
+		"merci": true, "thanks": true, "ok": true,
+		"oui": true, "non": true,
+		"\u00e7a va": true, "ca va": true, "\u00e7a va?": true, "ca va?": true,
+	}
+	if greetings[lower] {
+		return IntentGreeting
+	}
+
+	// Default: general chat
+	return IntentChat
+}
+
+// ============================================================================
+// FAST REPLIES - instant responses without LLM
+// ============================================================================
+
+var fastReplies = map[string]string{
+	"ping": "Pong ! :ping_pong:",
+}
+
+// GetFastReply checks if a non-command message deserves an instant reply
+// This is VERY selective - only for the most trivial interactions
+func GetFastReply(text string) (string, bool) {
+	clean := strings.ToLower(strings.TrimSpace(text))
+	if reply, exists := fastReplies[clean]; exists {
+		return reply, true
+	}
+	return "", false
 }
