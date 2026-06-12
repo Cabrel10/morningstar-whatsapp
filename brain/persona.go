@@ -76,17 +76,32 @@ func BuildChatPrompt(ctx MessageContext, history []ConversationMessage, userMem 
 		sb.WriteString("\n")
 	}
 
-	// 7. Quoted message (reply context)
+	// 7. Quoted message (reply context) — CRITICAL for conversation continuity
 	if ctx.QuotedText != "" {
 		quotedAuthor := "quelqu'un"
 		if ctx.QuotedSender != "" {
-			quotedAuthor = strings.Split(ctx.QuotedSender, "@")[0]
+			if strings.Contains(ctx.QuotedSender, "237620864894") || ctx.QuotedSender == "Poulga" {
+				quotedAuthor = "Poulga (Toi)"
+			} else {
+				quotedAuthor = strings.Split(ctx.QuotedSender, "@")[0]
+			}
 		}
-		sb.WriteString(fmt.Sprintf("MESSAGE CITE (de %s):\n\"%s\"\n\n", quotedAuthor, ctx.QuotedText))
+		if ctx.IsReplyToBot {
+			// When user replies to OUR message, emphasize the thread
+			sb.WriteString(fmt.Sprintf("\n[CONTEXTE IMPORTANT - L'utilisateur repond a TON message precedent]\nTU AVAIS DIT: \"%s\"\n\n", ctx.QuotedText))
+		} else {
+			sb.WriteString(fmt.Sprintf("MESSAGE CITE (de %s):\n\"%s\"\n\n", quotedAuthor, ctx.QuotedText))
+		}
 	}
 
-	// 8. Current message
-	sb.WriteString(fmt.Sprintf("%s dit: %s\n\nReponds:", ctx.PushName, ctx.Text))
+	// 8. Current message with clear instruction
+	if ctx.IsReplyToBot {
+		sb.WriteString(fmt.Sprintf("%s te repond: %s\n\nContinue naturellement la conversation en tenant compte de ce que tu avais dit precedemment:", ctx.PushName, ctx.Text))
+	} else if ctx.IsMentioned {
+		sb.WriteString(fmt.Sprintf("%s te parle: %s\n\nReponds en tenant compte du contexte de la conversation:", ctx.PushName, ctx.Text))
+	} else {
+		sb.WriteString(fmt.Sprintf("%s dit: %s\n\nReponds:", ctx.PushName, ctx.Text))
+	}
 
 	return sb.String()
 }
@@ -114,10 +129,16 @@ func BuildQuestionPrompt(ctx MessageContext, history []ConversationMessage, fact
 	}
 
 	if ctx.QuotedText != "" {
-		sb.WriteString(fmt.Sprintf("En reponse a: \"%s\"\n\n", ctx.QuotedText))
+		if ctx.IsReplyToBot {
+			sb.WriteString(fmt.Sprintf("[Tu avais repondu]: \"%s\"\n\n", ctx.QuotedText))
+			sb.WriteString(fmt.Sprintf("%s te demande: %s\n\nContinue ta reponse:", ctx.PushName, ctx.Text))
+		} else {
+			sb.WriteString(fmt.Sprintf("En reponse a: \"%s\"\n\n", ctx.QuotedText))
+			sb.WriteString(fmt.Sprintf("Question de %s: %s\n\nReponds:", ctx.PushName, ctx.Text))
+		}
+	} else {
+		sb.WriteString(fmt.Sprintf("Question de %s: %s\n\nReponds:", ctx.PushName, ctx.Text))
 	}
-
-	sb.WriteString(fmt.Sprintf("Question de %s: %s\n\nReponds:", ctx.PushName, ctx.Text))
 
 	return sb.String()
 }

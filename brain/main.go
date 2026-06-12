@@ -254,11 +254,28 @@ func handleWebhook(c echo.Context) error {
 		(ctxInfo != nil && ctxInfo.QuotedMessage != nil)
 	
 	if ctxInfo != nil && hasReply {
-		// Check if the quoted message sender is the bot
+		// Method 1: Check participant field (standard)
 		participant := ctxInfo.Participant
 		if strings.Contains(participant, "237620864894") || participant == botJid {
 			isReplyToBot = true
-			fmt.Printf("[REPLY] Detected reply to Poulga from %s\n", data.PushName)
+		}
+		// Method 2: If participant is empty but we have a quoted stanzaId,
+		// check our DB if that message was sent by the bot
+		if !isReplyToBot && ctxInfo.StanzaId != "" {
+			if IsMessageFromBot(remoteJid, ctxInfo.StanzaId) {
+				isReplyToBot = true
+			}
+		}
+		// Method 3: If participant is empty and no stanzaId match,
+		// check if quoted text matches a recent bot response
+		if !isReplyToBot && quotedText != "" {
+			if IsRecentBotMessage(remoteJid, quotedText) {
+				isReplyToBot = true
+			}
+		}
+		if isReplyToBot {
+			fmt.Printf("[REPLY] Reply to Poulga detected from %s (participant=%q, stanzaId=%s)\n",
+				data.PushName, participant, ctxInfo.StanzaId)
 		}
 	}
 

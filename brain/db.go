@@ -738,3 +738,56 @@ func cleanupOldMessages(days int) error {
 
 	return err
 }
+
+// ============================================================================
+// REPLY DETECTION HELPERS
+// ============================================================================
+
+// IsMessageFromBot checks if a message with the given stanzaId was sent by the bot
+// This handles the case where Evolution API doesn't populate participant in contextInfo
+func IsMessageFromBot(groupJid, stanzaId string) bool {
+	if stanzaId == "" {
+		return false
+	}
+	var count int
+	err := db.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM conversation_history 
+		 WHERE group_jid = $1 AND is_from_bot = true AND quoted_msg_id = $2
+		 AND created_at > NOW() - INTERVAL '24 hours'`,
+		groupJid, stanzaId).Scan(&count)
+	if err != nil {
+		// Fallback: check Evolution's Message table
+		err = db.QueryRow(context.Background(),
+			`SELECT COUNT(*) FROM public."Message" 
+			 WHERE "key"->>'id' = $1 AND "key"->>'fromMe' = 'true'`,
+			stanzaId).Scan(&count)
+		if err != nil {
+			return false
+		}
+	}
+	return count > 0
+}
+
+// IsRecentBotMessage checks if the quoted text matches a recent bot response
+// Uses prefix matching (first 100 chars) since quoted text might be truncated
+func IsRecentBotMessage(groupJid, quotedText string) bool {
+	if quotedText == "" || len(quotedText) < 10 {
+		return false
+	}
+	// Use first 100 chars for matching (quoted messages can be truncated)
+	matchText := quotedText
+	if len(matchText) > 100 {
+		matchText = matchText[:100]
+	}
+	var count int
+	err := db.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM conversation_history 
+		 WHERE group_jid = $1 AND is_from_bot = true 
+		 AND message LIKE $2 || '%'
+		 AND created_at > NOW() - INTERVAL '1 hour'`,
+		groupJid, matchText).Scan(&count)
+	if err != nil {
+		return false
+	}
+	return count > 0
+}
