@@ -381,7 +381,12 @@ func processLLMResponse(ctx MessageContext) {
 	fmt.Printf("[LLM] Intent: %s (%.0fms)\n", intent, float64(time.Since(start).Microseconds())/1000)
 
 	// Gather context from all memory levels
-	history, _ := GetConversationContext(ctx.RemoteJid, 8)
+	// Adaptive history: more context when user replies to bot (thread continuation)
+	historyLimit := 10
+	if ctx.IsReplyToBot {
+		historyLimit = 15 // More context for thread continuity
+	}
+	history, _ := GetConversationContext(ctx.RemoteJid, historyLimit)
 	userMem, _ := GetUserMemory(ctx.SenderJid, ctx.RemoteJid)
 	groupMem, _ := GetGroupMemory(ctx.RemoteJid)
 	facts, _ := getFacts(ctx.RemoteJid)
