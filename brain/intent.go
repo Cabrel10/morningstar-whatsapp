@@ -139,7 +139,17 @@ func IsCommand(text string) (string, string, bool) {
 	}
 
 	// Commandes sans préfixe (help, stats, persona, etc.)
-	commands := []string{"help", "stats", "persona", "confidentialité", "ping", "tagall", "sticker", "menu", "yt", "fb", "tt", "video", "audio"}
+	commands := []string{
+		"aide", "help", "menu", "qui-es-tu", "qui", "mémoire", "résumé", "resume", "stats", "statistiques",
+		"persona", "personnalité", "confidentialité", "privacy",
+		"ping", "pong", "tagall", "mentionner", "sticker",
+		"ouvrir", "open", "fermer", "close",
+		"avertir", "warn", "avertissements", "warnings", "warn-list", "warn-reset", "reset",
+		"bienvenue", "anti-lien", "anti-spam", "anti-suppression",
+		"yt", "fb", "tt", "video", "vidéo", "audio", "télécharger", "download", "miniature", "thumbnail", "infos", "info",
+		"recherche", "search", "code", "explique", "explain", "débogue", "debug",
+		"statut-serveur", "server-status", "logs", "docker", "fait", "fact",
+	}
 	for _, cmd := range commands {
 		if lower == cmd { // Match exact pour commande sans préfixe
 			fmt.Printf("[DEBUG] IS_COMMAND_RESULT=true EXACT CMD=%s\n", cmd)
