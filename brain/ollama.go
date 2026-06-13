@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -10,61 +11,302 @@ import (
 )
 
 var (
-	semaphore = make(chan struct{}, 2) // Max 2 concurrent Ollama requests
+	semaphore = make(chan struct{}, 3) // Max 3 concurrent LLM requests
 )
 
 // ============================================================================
-// OLLAMA CONFIGURATION for Gemma3 on 4vCPU / 8GB RAM
+// GROQ API STRUCTURES (OpenAI-compatible)
 // ============================================================================
 
-// getOllamaOptions returns tuned parameters based on intent
-// Temperature varies by task: low for code/facts, medium for chat, higher for stories
+type GroqRequest struct {
+	Model       string        `json:"model"`
+	Messages    []GroqMessage `json:"messages"`
+	Temperature float64       `json:"temperature"`
+	MaxTokens   int           `json:"max_tokens"`
+	TopP        float64       `json:"top_p"`
+	Stream      bool          `json:"stream"`
+}
+
+type GroqMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type GroqResponse struct {
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
+	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
+	Error *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+	} `json:"error,omitempty"`
+}
+
+// ============================================================================
+// LLM BACKEND CONFIGURATION
+// ============================================================================
+
+// getTemperatureForIntent returns the temperature for a given intent
+func getTemperatureForIntent(intent Intent) float64 {
+	switch intent {
+	case IntentCode:
+		return 0.3
+	case IntentQuestion:
+		return 0.4
+	case IntentStory:
+		return 0.75
+	case IntentGame:
+		return 0.5
+	case IntentSummary:
+		return 0.3
+	case IntentSearch:
+		return 0.3
+	case IntentGreeting:
+		return 0.6
+	default:
+		return 0.55
+	}
+}
+
+// getMaxTokensForIntent returns max tokens for a given intent
+func getMaxTokensForIntent(intent Intent) int {
+	switch intent {
+	case IntentCode:
+		return 1024
+	case IntentStory:
+		return 800
+	case IntentGame:
+		return 200
+	case IntentGreeting:
+		return 100
+	case IntentSearch:
+		return 200
+	default:
+		return 400
+	}
+}
+
+// ============================================================================
+// GROQ API CALL (PRIMARY - Fast cloud inference)
+// ============================================================================
+
+func callGroq(systemPrompt, userPrompt string, intent Intent) (string, error) {
+	apiKey := os.Getenv("GROQ_API_KEY")
+	if apiKey == "" {
+		return "", fmt.Errorf("GROQ_API_KEY not set")
+	}
+
+	model := os.Getenv("GROQ_MODEL")
+	if model == "" {
+		model = "llama-3.3-70b-versatile"
+	}
+
+	temperature := getTemperatureForIntent(intent)
+	maxTokens := getMaxTokensForIntent(intent)
+
+	messages := []GroqMessage{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userPrompt},
+	}
+
+	reqBody := GroqRequest{
+		Model:       model,
+		Messages:    messages,
+		Temperature: temperature,
+		MaxTokens:   maxTokens,
+		TopP:        0.9,
+		Stream:      false,
+	}
+
+	client := resty.New()
+	client.SetTimeout(30 * time.Second) // Groq is fast, 30s is more than enough
+
+	fmt.Printf("[GROQ] Calling %s intent=%s (temp=%.2f, max_tokens=%d)\n",
+		model, intent, temperature, maxTokens)
+
+	var result GroqResponse
+	resp, err := client.R().
+		SetHeader("Authorization", "Bearer "+apiKey).
+		SetHeader("Content-Type", "application/json").
+		SetBody(reqBody).
+		SetResult(&result).
+		Post("https://api.groq.com/openai/v1/chat/completions")
+
+	if err != nil {
+		fmt.Printf("[GROQ] Network error: %v\n", err)
+		return "", err
+	}
+
+	if resp.IsError() {
+		// Parse error body
+		var errResp GroqResponse
+		_ = json.Unmarshal(resp.Body(), &errResp)
+		errMsg := resp.String()
+		if errResp.Error != nil {
+			errMsg = errResp.Error.Message
+		}
+		fmt.Printf("[GROQ] API Error %d: %s\n", resp.StatusCode(), errMsg)
+		return "", fmt.Errorf("groq error %d: %s", resp.StatusCode(), errMsg)
+	}
+
+	if len(result.Choices) == 0 {
+		return "", fmt.Errorf("groq: empty response")
+	}
+
+	response := result.Choices[0].Message.Content
+	fmt.Printf("[GROQ] OK: %d chars, %d tokens (prompt=%d, completion=%d)\n",
+		len(response), result.Usage.TotalTokens, result.Usage.PromptTokens, result.Usage.CompletionTokens)
+
+	return response, nil
+}
+
+// ============================================================================
+// GEMINI API CALL (SECONDARY - Google free tier)
+// ============================================================================
+
+type GeminiRequest struct {
+	Contents         []GeminiContent        `json:"contents"`
+	SystemInstruction *GeminiContent        `json:"systemInstruction,omitempty"`
+	GenerationConfig map[string]interface{} `json:"generationConfig"`
+}
+
+type GeminiContent struct {
+	Parts []GeminiPart `json:"parts"`
+	Role  string       `json:"role,omitempty"`
+}
+
+type GeminiPart struct {
+	Text string `json:"text"`
+}
+
+type GeminiResponse struct {
+	Candidates []struct {
+		Content struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"content"`
+	} `json:"candidates"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+}
+
+func callGemini(systemPrompt, userPrompt string, intent Intent) (string, error) {
+	apiKey := os.Getenv("GEMINI_API_KEY")
+	if apiKey == "" {
+		return "", fmt.Errorf("GEMINI_API_KEY not set")
+	}
+
+	model := os.Getenv("GEMINI_MODEL")
+	if model == "" {
+		model = "gemini-2.5-flash"
+	}
+
+	temperature := getTemperatureForIntent(intent)
+	maxTokens := getMaxTokensForIntent(intent)
+
+	reqBody := GeminiRequest{
+		SystemInstruction: &GeminiContent{
+			Parts: []GeminiPart{{Text: systemPrompt}},
+		},
+		Contents: []GeminiContent{
+			{
+				Role:  "user",
+				Parts: []GeminiPart{{Text: userPrompt}},
+			},
+		},
+		GenerationConfig: map[string]interface{}{
+			"temperature":     temperature,
+			"maxOutputTokens": maxTokens,
+			"topP":            0.9,
+		},
+	}
+
+	client := resty.New()
+	client.SetTimeout(30 * time.Second)
+
+	fmt.Printf("[GEMINI] Calling %s intent=%s (temp=%.2f, max_tokens=%d)\n",
+		model, intent, temperature, maxTokens)
+
+	var result GeminiResponse
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", model, apiKey)
+
+	resp, err := client.R().
+		SetHeader("Content-Type", "application/json").
+		SetBody(reqBody).
+		SetResult(&result).
+		Post(url)
+
+	if err != nil {
+		fmt.Printf("[GEMINI] Network error: %v\n", err)
+		return "", err
+	}
+
+	if resp.IsError() {
+		fmt.Printf("[GEMINI] API Error %d: %s\n", resp.StatusCode(), resp.String())
+		return "", fmt.Errorf("gemini error %d: %s", resp.StatusCode(), resp.String())
+	}
+
+	if result.Error != nil {
+		return "", fmt.Errorf("gemini: %s", result.Error.Message)
+	}
+
+	if len(result.Candidates) == 0 || len(result.Candidates[0].Content.Parts) == 0 {
+		return "", fmt.Errorf("gemini: empty response")
+	}
+
+	response := result.Candidates[0].Content.Parts[0].Text
+	fmt.Printf("[GEMINI] OK: %d chars\n", len(response))
+	return response, nil
+}
+
+// ============================================================================
+// OLLAMA LOCAL CALL (FALLBACK)
+// ============================================================================
+
 func getOllamaOptions(intent Intent) map[string]interface{} {
 	base := map[string]interface{}{
-		"num_thread":     4,     // Use all 4 vCPUs
-		"num_ctx":        2048,  // Reduced from 4096 - saves time
+		"num_thread":     4,
+		"num_ctx":        1024,
 		"top_p":          0.90,
-		"repeat_penalty": 1.15,  // Prevent repetition loops
-		"num_predict":    512,   // Reduced from 1024 - faster responses
+		"repeat_penalty": 1.15,
+		"num_predict":    256,
 	}
 
 	switch intent {
 	case IntentCode:
-		base["temperature"] = 0.3   // Very precise for code
-		base["num_predict"] = 1024  // Code needs more tokens but not 2048
-		base["repeat_penalty"] = 1.1
-	case IntentQuestion:
-		base["temperature"] = 0.4   // Factual, precise
+		base["temperature"] = 0.3
 		base["num_predict"] = 512
+	case IntentQuestion:
+		base["temperature"] = 0.4
+		base["num_predict"] = 256
 	case IntentStory:
-		base["temperature"] = 0.75  // Creative but not chaotic
-		base["num_predict"] = 1024  // Stories need length but not 2048
-		base["repeat_penalty"] = 1.2
+		base["temperature"] = 0.75
+		base["num_predict"] = 512
 	case IntentGame:
 		base["temperature"] = 0.5
-		base["num_predict"] = 256   // Games are short
-	case IntentSummary:
-		base["temperature"] = 0.3   // Factual summary
-		base["num_predict"] = 512
-	case IntentSearch:
-		base["temperature"] = 0.3
-		base["num_predict"] = 256
+		base["num_predict"] = 128
 	case IntentGreeting:
 		base["temperature"] = 0.6
-		base["num_predict"] = 128   // Short greetings
-	default: // IntentChat
-		base["temperature"] = 0.55  // Balanced
-		base["num_predict"] = 512
+		base["num_predict"] = 64
+	default:
+		base["temperature"] = 0.55
+		base["num_predict"] = 256
 	}
 
 	return base
 }
 
-// callOllama sends a prompt to Ollama and returns the response
-func callOllama(prompt string, images []string, temperature float64) (string, error) {
-	semaphore <- struct{}{}
-	defer func() { <-semaphore }()
-
+func callOllamaLocal(prompt string, intent Intent, images []string) (string, error) {
 	ollamaURL := os.Getenv("OLLAMA_URL")
 	if ollamaURL == "" {
 		ollamaURL = "http://localhost:11434"
@@ -72,27 +314,15 @@ func callOllama(prompt string, images []string, temperature float64) (string, er
 
 	model := os.Getenv("OLLAMA_MODEL")
 	if model == "" {
-		model = "gemma3:4b"
+		model = "qwen2.5:1.5b"
 	}
 
 	client := resty.New()
-	client.SetTimeout(60 * time.Second) // 60s max (Ollama peut être lent sur 4vCPU)
+	client.SetTimeout(90 * time.Second)
 
-	// If temperature is provided explicitly, use it; otherwise default
-	if temperature == 0 {
-		temperature = 0.55
-	}
+	options := getOllamaOptions(intent)
 
-	options := map[string]interface{}{
-		"num_thread":     4,
-		"num_ctx":        4096,
-		"temperature":    temperature,
-		"top_p":          0.90,
-		"repeat_penalty": 1.15,
-		"num_predict":    1024,
-	}
-
-	fmt.Printf("[OLLAMA] Calling %s (temp=%.2f, predict=%v)\n", model, temperature, options["num_predict"])
+	fmt.Printf("[OLLAMA-FALLBACK] Calling %s for intent=%s\n", model, intent)
 
 	var result OllamaResponse
 	resp, err := client.R().
@@ -100,7 +330,7 @@ func callOllama(prompt string, images []string, temperature float64) (string, er
 			Model:     model,
 			Prompt:    prompt,
 			Stream:    false,
-			KeepAlive: "24h",
+			KeepAlive: "5m",
 			Options:   options,
 			Images:    images,
 		}).
@@ -108,67 +338,122 @@ func callOllama(prompt string, images []string, temperature float64) (string, er
 		Post(fmt.Sprintf("%s/api/generate", ollamaURL))
 
 	if err != nil {
-		fmt.Printf("[OLLAMA] Error: %v\n", err)
+		fmt.Printf("[OLLAMA-FALLBACK] Error: %v\n", err)
 		return "", err
 	}
 
 	if resp.IsError() {
-		fmt.Printf("[OLLAMA] API Error: %s\n", resp.String())
 		return "", fmt.Errorf("ollama error: %s", resp.String())
 	}
 
-	fmt.Printf("[OLLAMA] Response: %d chars\n", len(result.Response))
+	fmt.Printf("[OLLAMA-FALLBACK] Response: %d chars\n", len(result.Response))
 	return result.Response, nil
 }
 
-// callOllamaWithIntent sends a prompt using intent-specific parameters
+// ============================================================================
+// MAIN LLM ENTRY POINTS (Groq first, Ollama fallback)
+// ============================================================================
+
+// callOllama is the legacy function - now routes through the unified system
+func callOllama(prompt string, images []string, temperature float64) (string, error) {
+	return callOllamaWithIntent(prompt, IntentChat, images)
+}
+
+// callOllamaWithIntent - PRIMARY ENTRY POINT for all LLM calls
+// Strategy: Groq > Gemini > Ollama local (in order of speed)
 func callOllamaWithIntent(prompt string, intent Intent, images []string) (string, error) {
 	semaphore <- struct{}{}
 	defer func() { <-semaphore }()
 
-	ollamaURL := os.Getenv("OLLAMA_URL")
-	if ollamaURL == "" {
-		ollamaURL = "http://localhost:11434"
+	start := time.Now()
+
+	// Extract system prompt from the full prompt for chat-based APIs
+	systemPrompt, userPrompt := splitPrompt(prompt)
+
+	// TRY 1: Groq API (fastest cloud inference)
+	groqKey := os.Getenv("GROQ_API_KEY")
+	if groqKey != "" {
+		response, err := callGroq(systemPrompt, userPrompt, intent)
+		if err == nil {
+			fmt.Printf("[LLM] Groq OK in %.1fs\n", time.Since(start).Seconds())
+			return response, nil
+		}
+		fmt.Printf("[LLM] Groq failed: %v, trying next backend...\n", err)
 	}
 
-	model := os.Getenv("OLLAMA_MODEL")
-	if model == "" {
-		model = "gemma3:4b"
+	// TRY 2: Gemini API (Google free tier - 15 RPM)
+	geminiKey := os.Getenv("GEMINI_API_KEY")
+	if geminiKey != "" {
+		response, err := callGemini(systemPrompt, userPrompt, intent)
+		if err == nil {
+			fmt.Printf("[LLM] Gemini OK in %.1fs\n", time.Since(start).Seconds())
+			return response, nil
+		}
+		fmt.Printf("[LLM] Gemini failed: %v, trying Ollama fallback...\n", err)
 	}
 
-	client := resty.New()
-	client.SetTimeout(60 * time.Second) // 60s max (Ollama peut être lent sur 4vCPU)
-
-	options := getOllamaOptions(intent)
-
-	fmt.Printf("[OLLAMA] Calling %s for intent=%s (temp=%.2f, predict=%v)\n",
-		model, intent, options["temperature"], options["num_predict"])
-
-	var result OllamaResponse
-	resp, err := client.R().
-		SetBody(OllamaRequest{
-			Model:     model,
-			Prompt:    prompt,
-			Stream:    false,
-			KeepAlive: "24h",
-			Options:   options,
-			Images:    images,
-		}).
-		SetResult(&result).
-		Post(fmt.Sprintf("%s/api/generate", ollamaURL))
-
+	// TRY 3: Ollama local (slow but works offline)
+	if groqKey == "" && geminiKey == "" {
+		fmt.Printf("[LLM] WARNING: No GROQ_API_KEY or GEMINI_API_KEY set! Using slow Ollama local.\n")
+	}
+	response, err := callOllamaLocal(prompt, intent, images)
 	if err != nil {
-		fmt.Printf("[OLLAMA] Error: %v\n", err)
+		fmt.Printf("[LLM] ALL backends failed! Groq + Gemini + Ollama. Error: %v\n", err)
 		return "", err
 	}
 
-	if resp.IsError() {
-		fmt.Printf("[OLLAMA] API Error: %s\n", resp.String())
-		return "", fmt.Errorf("ollama error: %s", resp.String())
+	fmt.Printf("[LLM] Ollama fallback OK in %.1fs\n", time.Since(start).Seconds())
+	return response, nil
+}
+
+// splitPrompt separates the system prompt from the user prompt
+// Convention: everything before the first "MESSAGES RECENTS:" or the user's actual query
+func splitPrompt(fullPrompt string) (system string, user string) {
+	// The system prompt is the persona/instructions at the top
+	// The user prompt is the actual conversation context + user message
+
+	// Find markers that indicate the start of user context
+	markers := []string{
+		"MESSAGES RECENTS:\n",
+		"CONNAISSANCES DU GROUPE:\n",
+		"CE QUE TU SAIS SUR",
+		"RESUME DES DISCUSSIONS",
+		"FAITS IMPORTANTS:\n",
+		"Contexte recent:\n",
+		"Question de ",
+		"Demande de ",
+		"Recherche de ",
+		"Messages:\n",
 	}
 
-	fmt.Printf("[OLLAMA] Response: %d chars\n", len(result.Response))
-	return result.Response, nil
+	// Default: use SystemPrompt as system, full prompt as user
+	system = SystemPrompt
+	user = fullPrompt
+
+	// Try to split at the first context marker
+	for _, marker := range markers {
+		idx := strings.Index(fullPrompt, marker)
+		if idx > 0 {
+			potentialSystem := strings.TrimSpace(fullPrompt[:idx])
+			potentialUser := strings.TrimSpace(fullPrompt[idx:])
+			if len(potentialSystem) > 20 && len(potentialUser) > 5 {
+				system = potentialSystem
+				user = potentialUser
+				break
+			}
+		}
+	}
+
+	// Ensure system prompt isn't too long (Groq has context limits)
+	if len(system) > 1500 {
+		system = system[:1500]
+	}
+	// Ensure user prompt isn't too long
+	if len(user) > 3000 {
+		user = user[len(user)-3000:]
+	}
+
+	return system, user
 }
 
 // ============================================================================
@@ -186,16 +471,16 @@ func cleanResponse(text string) string {
 	unwantedPrefixes := []string{
 		"Bonjour ! Je suis Poulga",
 		"Bonjour! Je suis Poulga",
-		"Bonjour \u00e0 tous !",
-		"Bonjour \u00e0 tous",
+		"Bonjour à tous !",
+		"Bonjour à tous",
 		"Je suis Poulga,",
 		"Je suis Poulga.",
 		"En tant que Poulga,",
 		"En tant qu'assistante,",
 		"Poulga :",
 		"Poulga:",
-		"Bien s\u00fbr !",
-		"Bien s\u00fbr,",
+		"Bien sûr !",
+		"Bien sûr,",
 		"Absolument !",
 	}
 
@@ -205,19 +490,16 @@ func cleanResponse(text string) string {
 		}
 	}
 
-	// If cleaning emptied the response
 	if text == "" {
 		return "..."
 	}
 
-	// Remove trailing incomplete sentences (cut off by num_predict)
-	// If the response doesn't end with punctuation, try to trim to last complete sentence
+	// Remove trailing incomplete sentences (cut off by max_tokens)
 	if len(text) > 100 {
 		lastChar := text[len(text)-1]
-		if lastChar != '.' && lastChar != '!' && lastChar != '?' && lastChar != ')' && lastChar != '"' {
-			// Find last sentence-ending punctuation
+		if lastChar != '.' && lastChar != '!' && lastChar != '?' && lastChar != ')' && lastChar != '"' && lastChar != '\n' {
 			lastDot := strings.LastIndexAny(text, ".!?")
-			if lastDot > len(text)/2 { // Only trim if we keep at least half
+			if lastDot > len(text)/2 {
 				text = text[:lastDot+1]
 			}
 		}

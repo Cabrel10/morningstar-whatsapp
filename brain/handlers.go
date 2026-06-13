@@ -756,31 +756,52 @@ func handleDownload(ctx MessageContext, cmd, url string) {
 	var ytdlpArgs []string
 	mediaType := "video"
 
+	// Common args with multiple strategies to bypass restrictions
 	commonArgs := []string{
-		"--cookies", "/app/cookies.txt",
-		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
 		"--geo-bypass",
 		"--no-check-certificates",
 		"--no-warnings",
 		"--max-filesize", "50M",
+		"--socket-timeout", "30",
+		"--retries", "3",
+		"--extractor-args", "youtube:player_client=web,mweb",
 		"-o", outputFile + ".%(ext)s",
+	}
+
+	// Add cookies only if file has real content (more than the placeholder comment)
+	cookieFile := "/app/cookies.txt"
+	if info, err := os.Stat(cookieFile); err == nil && info.Size() > 200 {
+		commonArgs = append([]string{"--cookies", cookieFile}, commonArgs...)
 	}
 
 	if cmd == "audio" {
 		mediaType = "audio"
-		ytdlpArgs = append(commonArgs, "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0")
+		ytdlpArgs = append(commonArgs, "--extract-audio", "--audio-format", "mp3", "--audio-quality", "128K")
 	} else {
-		ytdlpArgs = append(commonArgs, "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best")
+		ytdlpArgs = append(commonArgs, "-f", "best[ext=mp4][filesize<50M]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best")
 	}
 	ytdlpArgs = append(ytdlpArgs, url)
+
+	fmt.Printf("[DOWNLOAD] Executing yt-dlp with %d args\n", len(ytdlpArgs))
 
 	cmdExec := exec.Command("yt-dlp", ytdlpArgs...)
 	output, err := cmdExec.CombinedOutput()
 	if err != nil {
-		fmt.Printf("[DOWNLOAD] Error: %v | Output: %s\n", err, string(output))
-		errorMsg := "Impossible de telecharger. Le lien est bloque ou invalide."
-		if strings.Contains(string(output), "Sign in to confirm") {
-			errorMsg = "Bloque par la plateforme (protection anti-bot)."
+		outputStr := string(output)
+		fmt.Printf("[DOWNLOAD] Error: %v | Output: %s\n", err, outputStr)
+
+		errorMsg := "Impossible de telecharger."
+		if strings.Contains(outputStr, "Sign in to confirm") {
+			errorMsg = "YouTube bloque ce serveur (anti-bot). TikTok et Facebook marchent."
+		} else if strings.Contains(outputStr, "Video unavailable") {
+			errorMsg = "Video non disponible (privee ou supprimee)."
+		} else if strings.Contains(outputStr, "Unsupported URL") {
+			errorMsg = "Lien non supporte. Essaie YouTube, TikTok ou Facebook."
+		} else if strings.Contains(outputStr, "File is larger") {
+			errorMsg = "Video trop volumineuse (max 50 Mo)."
+		} else if strings.Contains(outputStr, "HTTP Error 403") {
+			errorMsg = "Acces refuse par la plateforme."
 		}
 		_ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, errorMsg, ctx.MsgId, ctx.SenderJid)
 		return
@@ -807,6 +828,8 @@ func handleDownload(ctx MessageContext, cmd, url string) {
 
 	base64Data := base64.StdEncoding.EncodeToString(data)
 	fileName := filepath.Base(realPath)
+
+	fmt.Printf("[DOWNLOAD] Sending %s (%d bytes) as %s\n", fileName, len(data), mediaType)
 
 	err = sendWhatsAppMedia(ctx.Instance, ctx.RemoteJid, base64Data, fileName, "", mediaType)
 	if err != nil {
