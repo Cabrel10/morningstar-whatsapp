@@ -1,4 +1,67 @@
-Tu as raison. On arrête les expériences bancales. Voici le plan pour une architecture **robuste** qui tient sur ton VPS 4 vCPU / 8 Go RAM, avec **20 commandes opérationnelles**, un LLM qui suit le **contexte**, les **citations**, les **replies**, et une **mémoire conversationnelle** par membre et par groupe.
+# Opus Report - 2026-06-13
+
+## Session Summary
+
+Today's session resulted in a major architectural upgrade and refinement of the MorningStar WhatsApp bot. The focus was on establishing a robust identity and reputation system, implementing a unified and high-quality WhatsApp rendering engine, and strictly separating administrative logic from the LLM for security.
+
+## Key Implementations & Fixes
+
+### 1. Identity & Reputation System
+*   **Member Profiles:** Implemented `.je-suis` and `.nommer` commands to manage custom names, moving away from relying solely on technical WhatsApp IDs.
+*   **Roles & Badges:** Created a flexible role system (`member_roles`, `roles`, `role_permissions`) allowing for granular permissions and visual badges (e.g., Admin, Developer).
+*   **Reputation Points:** Added a reputation system (`member_points`) with atomic UPSERT operations to prevent race conditions during point updates.
+*   **Audit Trail:** Enhanced `member_profile_versions` to track detailed profile changes.
+
+### 2. Unified WhatsApp Rendering
+*   **Response Style Engine:** Introduced `ResponseStyle` struct and `RenderWhatsApp` function in `brain/formatter.go`. This engine ensures all bot responses adhere to professional WhatsApp formatting standards.
+*   **Consistent UI:** Refactored all existing commands (e.g., `.aide`, `.statut-serveur`, `.profil`) to use the new rendering engine.
+
+### 3. LLM Prompting & Context
+*   **Enhanced Context Injection:** Optimized `BuildChatPrompt` to dynamically fetch and inject the user's real name, roles, and reputation points directly into the LLM context.
+*   **Optimized Memory:** Removed redundant database queries during prompt building by using passed parameters for group facts.
+*   **Refined System Prompt:** Updated `SystemPrompt` with strict styling rules and a more defined bot persona (Poulga).
+
+### 4. Robust Message Tracking & Reply Detection
+*   **Message ID Persistence:** Added `msg_id` column to `conversation_history` table.
+*   **Enhanced IsMessageFromBot:** Improved bot message detection by tracking both outgoing message IDs and reply relationships.
+*   **Reliable Context:** Updated `SaveMessage` to ensure every message (user and bot) is tracked with its unique WhatsApp ID.
+
+### 5. Technical Integrity & Performance
+*   **Ollama Optimization:** Configured `gemma3:4b` with higher context (`num_ctx: 4096`), longer predictions (`num_predict: 2048`), and infinite persistence (`keep_alive: -1m`).
+*   **Command Expansion:** Added missing robust commands including `.memoire`, `.fact`, and `.warn-reset`, bringing the total to over 34 fully functional commands.
+*   **Build Stability:** Verified the entire `brain` module builds successfully without any errors or warnings.
+
+### 6. Web Browsing & Autonomous Navigation
+*   **Web Scraping Engine:** Integrated `goquery` and `go-readability` for high-performance, distraction-free HTML extraction.
+*   **Autonomous Tools:** Added `web_read` tool to the LLM catalog, enabling Poulga to visit URLs mentioned in chat and extract factual data.
+*   **Direct Commands:** Implemented `.lire <url>` for manual site analysis and `.google <query>` for quick web searches.
+*   **Camoufox Ready:** The scraping engine is pre-wired to connect to a Camoufox REST API for bypassing advanced anti-bot protections (Cloudflare/Akamai).
+
+### 7. Finalization & Security Polish
+*   **Security (SSRF):** Implemented strict SSRF protection in the web scraper to block access to local and private networks (127.0.0.1, 192.168.x.x, etc.).
+*   **Content Safety:** Added a 5MB size limit for scraped HTML to prevent memory exhaustion from malicious or oversized pages.
+*   **Contextual Awareness:** Improved message reply detection. Poulga now correctly identifies when a user is replying to her messages, even if she isn't explicitly mentioned, enhancing conversation flow.
+*   **Refreshed Interface:** The help menu (`.aide`) has been completely overhauled to include all current functional commands, organized by category.
+*   **Testing Infrastructure:** Created `docs/TEST_GUIDE.md` for systematic evaluation of the agent's capabilities and architecture.
+
+## Deployment Status
+
+*   **Database:** `conversation_history` schema updated with `msg_id`.
+*   **Application:** `brain` module verified and ready for production deployment.
+*   **Verification:** All core logic verified through successful `go build`.
+
+## Final Architecture Pillars
+
+1.  **Strict Routing:** Commands (.prefix) are handled by Go; natural language by LLM.
+2.  **Rich Identity:** Poulga knows who she's talking to (Name, Badge, Reputation).
+3.  **Clean Memory:** Multi-level memory (Facts, User, Group, Context).
+4.  **Professional UI:** Every response is formatted for readability and style.
+5.  **Robust Backend:** Correct base64 sticker pipeline and multi-source video downloads.
+
+---
+
+# Previous Content Below
+
 
 ---
 

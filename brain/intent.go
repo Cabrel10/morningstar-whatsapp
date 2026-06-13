@@ -11,16 +11,16 @@ import (
 type Intent string
 
 const (
-	IntentCommand  Intent = "command"   // .xxx or !xxx
-	IntentChat     Intent = "chat"      // General conversation with LLM
-	IntentQuestion Intent = "question"  // Question directed at bot
-	IntentStory    Intent = "story"     // Storytelling request
-	IntentCode     Intent = "code"      // Code/programming help
-	IntentGame     Intent = "game"      // Game request
-	IntentSearch   Intent = "search"    // Memory/search request
-	IntentSummary  Intent = "summary"   // Summary request
-	IntentGreeting Intent = "greeting"  // Simple greeting
-	IntentIgnore   Intent = "ignore"    // Bot should not respond
+	IntentCommand  Intent = "command"  // .xxx or !xxx
+	IntentChat     Intent = "chat"     // General conversation with LLM
+	IntentQuestion Intent = "question" // Question directed at bot
+	IntentStory    Intent = "story"    // Storytelling request
+	IntentCode     Intent = "code"     // Code/programming help
+	IntentGame     Intent = "game"     // Game request
+	IntentSearch   Intent = "search"   // Memory/search request
+	IntentSummary  Intent = "summary"  // Summary request
+	IntentGreeting Intent = "greeting" // Simple greeting
+	IntentIgnore   Intent = "ignore"   // Bot should not respond
 )
 
 // ============================================================================
@@ -49,15 +49,15 @@ var commandAliases = map[string]string{
 	// Persona
 	"persona": "persona", "personnalit\u00e9": "persona", "personnalite": "persona",
 	// Moderation
-	"warn": "warn",
+	"warn":      "warn",
 	"warn-list": "warn-list", "avertissements": "warn-list",
 	"warn-reset": "warn-reset",
-	"kick": "kick",
-	"mute": "mute", "unmute": "unmute",
+	"kick":       "kick",
+	"mute":       "mute", "unmute": "unmute",
 	// Group management
 	"bienvenue": "bienvenue",
 	"anti-lien": "anti-lien",
-	"ouvrir": "ouvrir", "fermer": "fermer",
+	"ouvrir":    "ouvrir", "fermer": "fermer",
 	// Download
 	"yt": "yt", "youtube": "yt",
 	"fb": "fb", "facebook": "fb",

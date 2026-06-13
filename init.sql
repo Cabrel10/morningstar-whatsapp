@@ -5,25 +5,12 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- ============================================================================
--- FACTS (legacy, kept for backward compat)
--- ============================================================================
-
-CREATE TABLE IF NOT EXISTS facts (
-    id SERIAL PRIMARY KEY,
-    remote_jid VARCHAR(255) NOT NULL,
-    content TEXT NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_facts_remote_jid ON facts(remote_jid);
-CREATE INDEX IF NOT EXISTS idx_facts_created_at ON facts(created_at DESC);
-
--- ============================================================================
 -- CONVERSATION HISTORY (Level 2 memory)
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS conversation_history (
     id SERIAL PRIMARY KEY,
+    msg_id TEXT DEFAULT '',
     group_jid TEXT NOT NULL,
     sender_jid TEXT NOT NULL,
     sender_name TEXT DEFAULT '',
@@ -32,6 +19,7 @@ CREATE TABLE IF NOT EXISTS conversation_history (
     quoted_msg_id TEXT DEFAULT '',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+CREATE INDEX IF NOT EXISTS idx_convhist_msgid ON conversation_history(msg_id);
 CREATE INDEX IF NOT EXISTS idx_convhist_group_time ON conversation_history(group_jid, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_convhist_sender ON conversation_history(sender_jid, created_at DESC);
 
@@ -82,10 +70,10 @@ CREATE TABLE IF NOT EXISTS conversation_summaries (
 CREATE INDEX IF NOT EXISTS idx_summaries_remote_jid ON conversation_summaries(remote_jid, created_at DESC);
 
 -- ============================================================================
--- GROUP MEMBERS (profiles)
+-- MEMBER DETAILS (Additional member info)
 -- ============================================================================
 
-CREATE TABLE IF NOT EXISTS group_members (
+CREATE TABLE IF NOT EXISTS member_details (
     id SERIAL PRIMARY KEY,
     jid VARCHAR(255) NOT NULL,
     group_jid VARCHAR(255) NOT NULL,
@@ -99,12 +87,107 @@ CREATE TABLE IF NOT EXISTS group_members (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(jid, group_jid)
 );
-CREATE INDEX IF NOT EXISTS idx_members_group ON group_members(group_jid);
-CREATE INDEX IF NOT EXISTS idx_members_jid ON group_members(jid);
+CREATE INDEX IF NOT EXISTS idx_details_group ON member_details(group_jid);
+CREATE INDEX IF NOT EXISTS idx_details_jid ON member_details(jid);
 
 -- ============================================================================
--- SOCIAL GRAPH
+-- MEMBER PROFILES (Custom Names for display)
 -- ============================================================================
+
+CREATE TABLE IF NOT EXISTS member_profiles (
+    jid TEXT NOT NULL,
+    group_jid TEXT NOT NULL,
+    custom_name TEXT NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    PRIMARY KEY (jid, group_jid)
+);
+
+-- ============================================================================
+-- USER PROFILES (Detailed per-user information across groups)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS user_profiles (
+    id SERIAL PRIMARY KEY,
+    remote_jid TEXT UNIQUE NOT NULL,
+    display_name TEXT,
+    profession TEXT,
+    role TEXT,
+    facts TEXT, -- Can be JSONB or a simple text blob of facts
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- ============================================================================
+-- GROUP FACTS (Key-value store for group-specific knowledge)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS group_facts (
+    id SERIAL PRIMARY KEY,
+    group_jid TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(group_jid, key)
+);
+
+-- ============================================================================
+-- ROLES DEFINITION
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS roles (
+    role TEXT PRIMARY KEY,
+    description TEXT
+);
+
+-- ============================================================================
+-- MEMBER ROLES (Badges & Permissions)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS member_roles (
+    jid TEXT NOT NULL,
+    group_jid TEXT NOT NULL,
+    role TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    PRIMARY KEY (jid, group_jid, role)
+);
+
+-- ============================================================================
+-- ROLE PERMISSIONS (What each role can do)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS role_permissions (
+    role TEXT NOT NULL,
+    permission TEXT NOT NULL,
+    PRIMARY KEY (role, permission)
+);
+
+-- ============================================================================
+-- MEMBER POINTS (Reputation/Engagement)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS member_points (
+    jid TEXT NOT NULL,
+    group_jid TEXT NOT NULL,
+    points INTEGER DEFAULT 0,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    PRIMARY KEY (jid, group_jid)
+);
+
+-- ============================================================================
+-- MEMBER PROFILE VERSIONS (History of profile changes)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS member_profile_versions (
+    id SERIAL PRIMARY KEY,
+    jid TEXT NOT NULL,
+    group_jid TEXT NOT NULL,
+    field_name TEXT NOT NULL,
+    old_value TEXT,
+    new_value TEXT,
+    changed_by TEXT,
+    changed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
 
 CREATE TABLE IF NOT EXISTS member_interactions (
     id SERIAL PRIMARY KEY,

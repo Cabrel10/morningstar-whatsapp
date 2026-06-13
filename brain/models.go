@@ -33,20 +33,20 @@ type MessageKey struct {
 // ============================================================================
 
 type MessageContent struct {
-	Conversation    string               `json:"conversation"`
-	ContextInfo     *ContextInfo         `json:"contextInfo"`
-	ExtendedText    *ExtendedTextMessage `json:"extendedTextMessage"`
-	ImageMessage    *ImageMessage        `json:"imageMessage"`
-	VideoMessage    *VideoMessage        `json:"videoMessage"`
-	StickerMessage  *StickerMessage      `json:"stickerMessage"`
-	ReactionMessage *ReactionMessage     `json:"reactionMessage"`
-	AudioMessage    *AudioMessage        `json:"audioMessage"`
-	DocumentMessage *DocumentMessage     `json:"documentMessage"`
+	Conversation        string               `json:"conversation,omitempty"`
+	ExtendedTextMessage *ExtendedTextMessage `json:"extendedTextMessage,omitempty"`
+	ImageMessage        *ImageMessage        `json:"imageMessage,omitempty"`
+	VideoMessage        *VideoMessage        `json:"videoMessage,omitempty"`
+	StickerMessage      *StickerMessage      `json:"stickerMessage,omitempty"`
+	ReactionMessage     *ReactionMessage     `json:"reactionMessage,omitempty"`
+	AudioMessage        *AudioMessage        `json:"audioMessage,omitempty"`
+	DocumentMessage     *DocumentMessage     `json:"documentMessage,omitempty"`
+	ContextInfo         *ContextInfo         `json:"contextInfo,omitempty"` // Re-added
 }
 
 type ExtendedTextMessage struct {
 	Text        string       `json:"text"`
-	ContextInfo *ContextInfo `json:"contextInfo"`
+	ContextInfo *ContextInfo `json:"contextInfo,omitempty"`
 }
 
 type ImageMessage struct {
@@ -74,29 +74,24 @@ type ReactionMessage struct {
 }
 
 type AudioMessage struct {
-	Url      string       `json:"url"`
-	Mimetype string       `json:"mimetype"`
-	Seconds  int          `json:"seconds"`
+	Url         string       `json:"url"`
+	Mimetype    string       `json:"mimetype"`
+	Seconds     int          `json:"seconds"`
 	ContextInfo *ContextInfo `json:"contextInfo"`
 }
 
 type DocumentMessage struct {
-	Url      string       `json:"url"`
-	Mimetype string       `json:"mimetype"`
-	Title    string       `json:"title"`
+	Url         string       `json:"url"`
+	Mimetype    string       `json:"mimetype"`
+	Title       string       `json:"title"`
 	ContextInfo *ContextInfo `json:"contextInfo"`
 }
 
 type ContextInfo struct {
-	QuotedMessage *QuotedMessage `json:"quotedMessage"`
-	Participant   string         `json:"participant"`
-	StanzaId      string         `json:"stanzaId"`
-	MentionedJid  []string       `json:"mentionedJid"`
-}
-
-type QuotedMessage struct {
-	Conversation string `json:"conversation"`
-	ExtendedText *ExtendedTextMessage `json:"extendedTextMessage"`
+	QuotedMessage any      `json:"quotedMessage,omitempty"`
+	Participant   string   `json:"participant"`
+	StanzaId      string   `json:"stanzaId"`
+	MentionedJid  []string `json:"mentionedJid"`
 }
 
 // GetMessageText extracts text content from any message type
@@ -108,8 +103,8 @@ func GetMessageText(raw json.RawMessage) string {
 	if m.Conversation != "" {
 		return m.Conversation
 	}
-	if m.ExtendedText != nil && m.ExtendedText.Text != "" {
-		return m.ExtendedText.Text
+	if m.ExtendedTextMessage != nil && m.ExtendedTextMessage.Text != "" { // CORRECTED LINE
+		return m.ExtendedTextMessage.Text
 	}
 	if m.ImageMessage != nil && m.ImageMessage.Caption != "" {
 		return m.ImageMessage.Caption
@@ -123,19 +118,7 @@ func GetMessageText(raw json.RawMessage) string {
 	return ""
 }
 
-// GetQuotedText extracts quoted message text, checking both conversation and extended text
-func GetQuotedText(qm *QuotedMessage) string {
-	if qm == nil {
-		return ""
-	}
-	if qm.Conversation != "" {
-		return qm.Conversation
-	}
-	if qm.ExtendedText != nil && qm.ExtendedText.Text != "" {
-		return qm.ExtendedText.Text
-	}
-	return ""
-}
+// GetQuotedText function removed
 
 // ============================================================================
 // MESSAGE CONTEXT (the unified object every handler receives)
@@ -229,6 +212,14 @@ type EvolutionPresenceRequest struct {
 	Presence string `json:"presence"`
 }
 
+type EvolutionResponse struct {
+	Key struct {
+		RemoteJid string `json:"remoteJid"`
+		FromMe    bool   `json:"fromMe"`
+		Id        string `json:"id"`
+	} `json:"key"`
+}
+
 // ============================================================================
 // JOB QUEUE
 // ============================================================================
@@ -242,14 +233,15 @@ type Job struct {
 // ============================================================================
 
 type ConversationMessage struct {
-	ID         int
-	GroupJid   string
-	SenderJid  string
-	SenderName string
-	Message    string
-	IsFromBot  bool
+	ID          int
+	MsgId       string
+	GroupJid    string
+	SenderJid   string
+	SenderName  string
+	Message     string
+	IsFromBot   bool
 	QuotedMsgId string
-	CreatedAt  time.Time
+	CreatedAt   time.Time
 }
 
 type UserMemory struct {

@@ -11,6 +11,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// UserProfile represents a user's detailed profile information
+type UserProfile struct {
+	RemoteJid   string
+	DisplayName string
+	Profession  string
+	Role        string
+	Facts       string // Can be JSONB or a simple text blob of facts
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
 var db *pgxpool.Pool
 
 func initDB() error {
@@ -53,6 +64,7 @@ func runMigrations() error {
 		// Conversation history - Level 2 memory
 		`CREATE TABLE IF NOT EXISTS conversation_history (
 			id SERIAL PRIMARY KEY,
+			msg_id TEXT UNIQUE,
 			group_jid TEXT NOT NULL,
 			sender_jid TEXT NOT NULL,
 			sender_name TEXT DEFAULT '',
@@ -62,7 +74,7 @@ func runMigrations() error {
 			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_convhist_group_time ON conversation_history(group_jid, created_at DESC)`,
-		`CREATE INDEX IF NOT EXISTS idx_convhist_sender ON conversation_history(sender_jid, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_convhist_msgid ON conversation_history(msg_id)`,
 
 		// User memory - Level 1 memory (per user per group)
 		`CREATE TABLE IF NOT EXISTS user_memory (
@@ -119,6 +131,81 @@ func runMigrations() error {
 			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_rules_group ON group_rules(group_jid)`,
+
+		// Member Profiles (Custom Names)
+		`CREATE TABLE IF NOT EXISTS member_profiles (
+			jid TEXT NOT NULL,
+			group_jid TEXT NOT NULL,
+			custom_name TEXT NOT NULL,
+			updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+			PRIMARY KEY (jid, group_jid)
+		)`,
+
+		// User Profiles
+		`CREATE TABLE IF NOT EXISTS user_profiles (
+			id SERIAL PRIMARY KEY,
+			remote_jid TEXT UNIQUE NOT NULL,
+			display_name TEXT,
+			profession TEXT,
+			role TEXT,
+			facts TEXT,
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+			updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+		)`,
+
+		// Group Facts
+		`CREATE TABLE IF NOT EXISTS group_facts (
+			id SERIAL PRIMARY KEY,
+			group_jid TEXT NOT NULL,
+			key TEXT NOT NULL,
+			value TEXT NOT NULL,
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+			updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+			UNIQUE(group_jid, key)
+		)`,
+
+		// Roles Definition
+		`CREATE TABLE IF NOT EXISTS roles (
+			role TEXT PRIMARY KEY,
+			description TEXT
+		)`,
+
+		// Member Roles
+		`CREATE TABLE IF NOT EXISTS member_roles (
+			jid TEXT NOT NULL,
+			group_jid TEXT NOT NULL,
+			role TEXT NOT NULL,
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+			PRIMARY KEY (jid, group_jid, role)
+		)`,
+
+		// Role Permissions
+		`CREATE TABLE IF NOT EXISTS role_permissions (
+			role TEXT NOT NULL,
+			permission TEXT NOT NULL,
+			PRIMARY KEY (role, permission)
+		)`,
+
+		// Member Points
+		`CREATE TABLE IF NOT EXISTS member_points (
+			jid TEXT NOT NULL,
+			group_jid TEXT NOT NULL,
+			points INTEGER DEFAULT 0,
+			updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+			PRIMARY KEY (jid, group_jid)
+		)`,
+
+		// Member Profile Versions
+		`CREATE TABLE IF NOT EXISTS member_profile_versions (
+			id SERIAL PRIMARY KEY,
+			jid TEXT NOT NULL,
+			group_jid TEXT NOT NULL,
+			field_name TEXT NOT NULL,
+			old_value TEXT,
+			new_value TEXT,
+			changed_by TEXT,
+			changed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+		)`,
 	}
 
 	for _, sql := range migrations {
@@ -128,33 +215,48 @@ func runMigrations() error {
 		}
 	}
 
+	// Initialize default roles and permissions if empty
+	initRolesAndPermissions()
+
 	return nil
+}
+
+func initRolesAndPermissions() {
+	ctx := context.Background()
+	// Default roles
+	db.Exec(ctx, "INSERT INTO roles (role, description) VALUES ('Admin', 'Administrateur du groupe') ON CONFLICT DO NOTHING")
+	db.Exec(ctx, "INSERT INTO roles (role, description) VALUES ('Moderator', 'Modérateur du groupe') ON CONFLICT DO NOTHING")
+	db.Exec(ctx, "INSERT INTO roles (role, description) VALUES ('Developer', 'Développeur du bot') ON CONFLICT DO NOTHING")
+
+	// Default permissions for Admin
+	perms := []string{"kick", "ban", "warn", "mute", "unmute", "promote", "demote", "assign_role", "remove_role", "award_points"}
+	for _, p := range perms {
+		db.Exec(ctx, "INSERT INTO role_permissions (role, permission) VALUES ('Admin', $1) ON CONFLICT DO NOTHING", p)
+	}
 }
 
 // ============================================================================
 // LEVEL 2: CONVERSATION HISTORY
 // ============================================================================
 
-// SaveMessage stores a message in conversation history
-func SaveMessage(groupJid, senderJid, senderName, message string, isFromBot bool, quotedMsgId string) error {
+func SaveMessage(msgId, groupJid, senderJid, senderName, message string, isFromBot bool, quotedMsgId string) error {
 	if message == "" {
 		return nil
 	}
-	// Truncate very long messages to save space
 	if len(message) > 500 {
 		message = message[:500] + "..."
 	}
 	_, err := db.Exec(context.Background(),
-		`INSERT INTO conversation_history (group_jid, sender_jid, sender_name, message, is_from_bot, quoted_msg_id)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		groupJid, senderJid, senderName, message, isFromBot, quotedMsgId)
+		`INSERT INTO conversation_history (msg_id, group_jid, sender_jid, sender_name, message, is_from_bot, quoted_msg_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 ON CONFLICT (msg_id) DO NOTHING`,
+		msgId, groupJid, senderJid, senderName, message, isFromBot, quotedMsgId)
 	return err
 }
 
-// GetConversationContext returns the last N messages from a group
 func GetConversationContext(groupJid string, limit int) ([]ConversationMessage, error) {
 	rows, err := db.Query(context.Background(),
-		`SELECT id, group_jid, sender_jid, sender_name, message, is_from_bot, quoted_msg_id, created_at
+		`SELECT id, msg_id, group_jid, sender_jid, sender_name, message, is_from_bot, quoted_msg_id, created_at
 		 FROM conversation_history
 		 WHERE group_jid = $1
 		 ORDER BY created_at DESC LIMIT $2`,
@@ -167,24 +269,21 @@ func GetConversationContext(groupJid string, limit int) ([]ConversationMessage, 
 	var messages []ConversationMessage
 	for rows.Next() {
 		var m ConversationMessage
-		if err := rows.Scan(&m.ID, &m.GroupJid, &m.SenderJid, &m.SenderName, &m.Message, &m.IsFromBot, &m.QuotedMsgId, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.MsgId, &m.GroupJid, &m.SenderJid, &m.SenderName, &m.Message, &m.IsFromBot, &m.QuotedMsgId, &m.CreatedAt); err != nil {
 			continue
 		}
 		messages = append(messages, m)
 	}
 
-	// Reverse to get chronological order
 	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
 		messages[i], messages[j] = messages[j], messages[i]
 	}
-
 	return messages, nil
 }
 
-// GetUserMessages returns last N messages from a specific user in a group
 func GetUserMessages(groupJid, senderJid string, limit int) ([]ConversationMessage, error) {
 	rows, err := db.Query(context.Background(),
-		`SELECT id, group_jid, sender_jid, sender_name, message, is_from_bot, quoted_msg_id, created_at
+		`SELECT id, msg_id, group_jid, sender_jid, sender_name, message, is_from_bot, quoted_msg_id, created_at
 		 FROM conversation_history
 		 WHERE group_jid = $1 AND (sender_jid = $2 OR (is_from_bot = true AND quoted_msg_id != ''))
 		 ORDER BY created_at DESC LIMIT $2`,
@@ -197,21 +296,18 @@ func GetUserMessages(groupJid, senderJid string, limit int) ([]ConversationMessa
 	var messages []ConversationMessage
 	for rows.Next() {
 		var m ConversationMessage
-		if err := rows.Scan(&m.ID, &m.GroupJid, &m.SenderJid, &m.SenderName, &m.Message, &m.IsFromBot, &m.QuotedMsgId, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.MsgId, &m.GroupJid, &m.SenderJid, &m.SenderName, &m.Message, &m.IsFromBot, &m.QuotedMsgId, &m.CreatedAt); err != nil {
 			continue
 		}
 		messages = append(messages, m)
 	}
 
-	// Reverse
 	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
 		messages[i], messages[j] = messages[j], messages[i]
 	}
-
 	return messages, nil
 }
 
-// FormatConversationHistory formats messages as a readable "theater script"
 func FormatConversationHistory(messages []ConversationMessage) string {
 	if len(messages) == 0 {
 		return "(pas de messages recents)"
@@ -230,59 +326,8 @@ func FormatConversationHistory(messages []ConversationMessage) string {
 	return sb.String()
 }
 
-// getRecentMessages returns formatted messages (legacy compat)
-func getRecentMessages(remoteJid string, limit int) ([]string, error) {
-	msgs, err := GetConversationContext(remoteJid, limit)
-	if err != nil {
-		// Fallback to Evolution's Message table
-		return getRecentMessagesFromEvolution(remoteJid, limit)
-	}
-	if len(msgs) == 0 {
-		return getRecentMessagesFromEvolution(remoteJid, limit)
-	}
-
-	var result []string
-	for _, m := range msgs {
-		name := m.SenderName
-		if name == "" {
-			name = strings.Split(m.SenderJid, "@")[0]
-		}
-		if m.IsFromBot {
-			name = "Poulga"
-		}
-		result = append(result, fmt.Sprintf("%s: %s", name, m.Message))
-	}
-	return result, nil
-}
-
-// getRecentMessagesFromEvolution reads from Evolution API's Message table (fallback)
-func getRecentMessagesFromEvolution(remoteJid string, limit int) ([]string, error) {
-	rows, err := db.Query(context.Background(),
-		`SELECT COALESCE(message->>'conversation', message->'extendedTextMessage'->>'text') as content, 
-		 COALESCE("pushName", 'Utilisateur') 
-		 FROM public."Message" 
-		 WHERE key->>'remoteJid' = $1
-		 AND (message->>'conversation' IS NOT NULL OR message->'extendedTextMessage'->>'text' IS NOT NULL)
-		 ORDER BY "messageTimestamp" DESC LIMIT $2`,
-		remoteJid, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var messages []string
-	for rows.Next() {
-		var content, pushName string
-		if err := rows.Scan(&content, &pushName); err != nil {
-			continue
-		}
-		messages = append([]string{fmt.Sprintf("%s: %s", pushName, content)}, messages...)
-	}
-	return messages, nil
-}
-
 // ============================================================================
-// LEVEL 1: USER MEMORY (per-user knowledge)
+// LEVEL 1: USER MEMORY
 // ============================================================================
 
 func SaveUserMemory(userJid, groupJid, key, value string) error {
@@ -378,7 +423,7 @@ func FormatGroupMemory(entries []GroupMemoryEntry) string {
 }
 
 // ============================================================================
-// LEVEL 4: CONVERSATION SUMMARIES (compression)
+// LEVEL 4: CONVERSATION SUMMARIES
 // ============================================================================
 
 func SaveConversationSummary(remoteJid, summary string, msgCount int, periodStart, periodEnd time.Time) error {
@@ -418,63 +463,6 @@ func GetMessageCountSinceLastSummary(remoteJid string) (int, error) {
 }
 
 // ============================================================================
-// FACTS (existing system, kept for backward compat)
-// ============================================================================
-
-func getFacts(remoteJid string) ([]string, error) {
-	rows, err := db.Query(context.Background(),
-		"SELECT content FROM facts WHERE remote_jid = $1 ORDER BY created_at DESC LIMIT 5",
-		remoteJid)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var facts []string
-	for rows.Next() {
-		var content string
-		if err := rows.Scan(&content); err != nil {
-			continue
-		}
-		facts = append(facts, content)
-	}
-	return facts, nil
-}
-
-func getFactsDetailed(remoteJid string) ([]FactEntry, error) {
-	rows, err := db.Query(context.Background(),
-		"SELECT id, content FROM facts WHERE remote_jid = $1 ORDER BY created_at DESC LIMIT 20",
-		remoteJid)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var facts []FactEntry
-	for rows.Next() {
-		var f FactEntry
-		if err := rows.Scan(&f.ID, &f.Content); err == nil {
-			facts = append(facts, f)
-		}
-	}
-	return facts, nil
-}
-
-func addFact(remoteJid, content string) error {
-	_, err := db.Exec(context.Background(),
-		"INSERT INTO facts (remote_jid, content) VALUES ($1, $2)",
-		remoteJid, content)
-	return err
-}
-
-func deleteFact(remoteJid string, id int) error {
-	_, err := db.Exec(context.Background(),
-		"DELETE FROM facts WHERE remote_jid = $1 AND id = $2",
-		remoteJid, id)
-	return err
-}
-
-// ============================================================================
 // SOCIAL GRAPH
 // ============================================================================
 
@@ -509,11 +497,11 @@ func recordStickerUsage(jid, sha256 string) error {
 
 func upsertMember(jid, groupJid, pushName string) error {
 	_, err := db.Exec(context.Background(),
-		`INSERT INTO group_members (jid, group_jid, push_name, message_count, last_seen)
+		`INSERT INTO member_details (jid, group_jid, push_name, message_count, last_seen)
 		 VALUES ($1, $2, $3, 1, CURRENT_TIMESTAMP)
 		 ON CONFLICT (jid, group_jid) DO UPDATE SET
 		 push_name = EXCLUDED.push_name,
-		 message_count = group_members.message_count + 1,
+		 message_count = member_details.message_count + 1,
 		 last_seen = CURRENT_TIMESTAMP`,
 		jid, groupJid, pushName)
 	return err
@@ -522,7 +510,7 @@ func upsertMember(jid, groupJid, pushName string) error {
 func getMemberProfiles(groupJid string) (string, error) {
 	rows, err := db.Query(context.Background(),
 		`SELECT push_name, skills, interests, message_count
-		 FROM group_members
+		 FROM member_details
 		 WHERE group_jid = $1
 		 ORDER BY message_count DESC LIMIT 15`,
 		groupJid)
@@ -641,6 +629,203 @@ func listWarnings(groupJid string) (string, error) {
 }
 
 // ============================================================================
+// MEMBER PROFILES (Custom Names)
+// ============================================================================
+
+func SaveMemberName(jid, groupJid, name string) error {
+	_, err := db.Exec(context.Background(), `
+		INSERT INTO member_profiles (jid, group_jid, custom_name, updated_at)
+		VALUES ($1, $2, $3, NOW())
+		ON CONFLICT (jid, group_jid) DO UPDATE SET
+		custom_name = EXCLUDED.custom_name, updated_at = NOW()
+	`, jid, groupJid, name)
+	return err
+}
+
+func GetMemberName(jid, groupJid, fallbackName string) string {
+	var customName string
+	err := db.QueryRow(context.Background(), `
+		SELECT custom_name FROM member_profiles
+		WHERE jid = $1 AND group_jid = $2
+	`, jid, groupJid).Scan(&customName)
+
+	if err != nil || customName == "" {
+		return fallbackName
+	}
+	return customName
+}
+
+// ============================================================================
+// USER PROFILES
+// ============================================================================
+
+func SaveUserProfile(profile UserProfile) error {
+	_, err := db.Exec(context.Background(), `
+		INSERT INTO user_profiles (remote_jid, display_name, profession, role, facts, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+		ON CONFLICT (remote_jid) DO UPDATE SET
+		display_name = EXCLUDED.display_name,
+		profession = EXCLUDED.profession,
+		role = EXCLUDED.role,
+		facts = EXCLUDED.facts,
+		updated_at = NOW()
+	`, profile.RemoteJid, profile.DisplayName, profile.Profession, profile.Role, profile.Facts)
+	return err
+}
+
+func GetUserProfile(remoteJid string) (UserProfile, error) {
+	var profile UserProfile
+	err := db.QueryRow(context.Background(), `
+		SELECT remote_jid, display_name, profession, role, facts, created_at, updated_at
+		FROM user_profiles
+		WHERE remote_jid = $1
+	`, remoteJid).Scan(
+		&profile.RemoteJid,
+		&profile.DisplayName,
+		&profile.Profession,
+		&profile.Role,
+		&profile.Facts,
+		&profile.CreatedAt,
+		&profile.UpdatedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return UserProfile{RemoteJid: remoteJid}, nil
+	}
+	return profile, err
+}
+
+// ============================================================================
+// GROUP FACTS
+// ============================================================================
+
+func SaveGroupFact(groupJid, key, value string) error {
+	_, err := db.Exec(context.Background(), `
+		INSERT INTO group_facts (group_jid, key, value, created_at, updated_at)
+		VALUES ($1, $2, $3, NOW(), NOW())
+		ON CONFLICT (group_jid, key) DO UPDATE SET
+		value = EXCLUDED.value, updated_at = NOW()
+	`, groupJid, key, value)
+	return err
+}
+
+func GetGroupFacts(groupJid string) ([]GroupMemoryEntry, error) {
+	rows, err := db.Query(context.Background(), `
+		SELECT id, group_jid, key, value, created_at FROM group_facts
+		WHERE group_jid = $1 ORDER BY key ASC
+	`, groupJid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var facts []GroupMemoryEntry
+	for rows.Next() {
+		var f GroupMemoryEntry
+		if err := rows.Scan(&f.ID, &f.GroupJid, &f.Key, &f.Value, &f.CreatedAt); err != nil {
+			continue
+		}
+		facts = append(facts, f)
+	}
+	return facts, nil
+}
+
+// ============================================================================
+// MEMBER ROLES & PERMISSIONS
+// ============================================================================
+
+func SaveMemberRole(jid, groupJid, role string) error {
+	_, err := db.Exec(context.Background(), `
+		INSERT INTO member_roles (jid, group_jid, role, created_at)
+		VALUES ($1, $2, $3, NOW())
+		ON CONFLICT (jid, group_jid, role) DO NOTHING
+	`, jid, groupJid, role)
+	return err
+}
+
+func GetMemberRoles(jid, groupJid string) ([]string, error) {
+	rows, err := db.Query(context.Background(), `
+		SELECT role FROM member_roles
+		WHERE jid = $1 AND group_jid = $2
+	`, jid, groupJid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var roles []string
+	for rows.Next() {
+		var role string
+		if err := rows.Scan(&role); err != nil {
+			continue
+		}
+		roles = append(roles, role)
+	}
+	return roles, nil
+}
+
+func RemoveMemberRole(jid, groupJid, role string) error {
+	_, err := db.Exec(context.Background(), `
+		DELETE FROM member_roles
+		WHERE jid = $1 AND group_jid = $2 AND role = $3
+	`, jid, groupJid, role)
+	return err
+}
+
+func HasPermission(jid, groupJid, permission string) (bool, error) {
+	roles, err := GetMemberRoles(jid, groupJid)
+	if err != nil {
+		return false, err
+	}
+	if len(roles) == 0 {
+		return false, nil
+	}
+	var count int
+	err = db.QueryRow(context.Background(), `
+		SELECT COUNT(*) FROM role_permissions
+		WHERE permission = $1 AND role = ANY($2)
+	`, permission, roles).Scan(&count)
+	return count > 0, err
+}
+
+// ============================================================================
+// MEMBER POINTS
+// ============================================================================
+
+func UpdateMemberPoints(jid, groupJid string, pointsDelta int) error {
+	_, err := db.Exec(context.Background(), `
+		INSERT INTO member_points (jid, group_jid, points, updated_at)
+		VALUES ($1, $2, $3, NOW())
+		ON CONFLICT (jid, group_jid) DO UPDATE SET
+		points = member_points.points + EXCLUDED.points, updated_at = NOW()
+	`, jid, groupJid, pointsDelta)
+	return err
+}
+
+func GetMemberPoints(jid, groupJid string) (int, error) {
+	var points int
+	err := db.QueryRow(context.Background(), `
+		SELECT points FROM member_points
+		WHERE jid = $1 AND group_jid = $2
+	`, jid, groupJid).Scan(&points)
+	if err == pgx.ErrNoRows {
+		return 0, nil
+	}
+	return points, err
+}
+
+// ============================================================================
+// MEMBER PROFILE VERSIONS
+// ============================================================================
+
+func LogProfileChange(jid, groupJid, fieldName, oldValue, newValue, changedBy string) error {
+	_, err := db.Exec(context.Background(), `
+		INSERT INTO member_profile_versions (jid, group_jid, field_name, old_value, new_value, changed_by, changed_at)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW())
+	`, jid, groupJid, fieldName, oldValue, newValue, changedBy)
+	return err
+}
+
+// ============================================================================
 // NOTES & REMINDERS
 // ============================================================================
 
@@ -721,14 +906,12 @@ func deleteRule(groupJid string, id int) error {
 // ============================================================================
 
 func cleanupOldMessages(days int) error {
-	// Clean conversation_history older than N days
 	_, err := db.Exec(context.Background(),
 		fmt.Sprintf(`DELETE FROM conversation_history WHERE created_at < NOW() - INTERVAL '%d days'`, days))
 	if err != nil {
 		fmt.Printf("[DB] Cleanup conversation_history error: %v\n", err)
 	}
 
-	// Also clean Evolution's Message table
 	_, err2 := db.Exec(context.Background(),
 		fmt.Sprintf(`DELETE FROM public."Message" 
 		 WHERE "messageTimestamp" < extract(epoch from (now() - interval '%d days'))`, days))
@@ -743,38 +926,35 @@ func cleanupOldMessages(days int) error {
 // REPLY DETECTION HELPERS
 // ============================================================================
 
-// IsMessageFromBot checks if a message with the given stanzaId was sent by the bot
-// This handles the case where Evolution API doesn't populate participant in contextInfo
 func IsMessageFromBot(groupJid, stanzaId string) bool {
 	if stanzaId == "" {
 		return false
 	}
 	var count int
+	// Method A: Check if we have this message in history as a bot message
 	err := db.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM conversation_history 
+		 WHERE group_jid = $1 AND is_from_bot = true AND msg_id = $2`,
+		groupJid, stanzaId).Scan(&count)
+	
+	if err == nil && count > 0 {
+		return true
+	}
+
+	// Method B: Fallback - check if there is a bot message that quotes this message (suggesting this message was part of a bot interaction)
+	err = db.QueryRow(context.Background(),
 		`SELECT COUNT(*) FROM conversation_history 
 		 WHERE group_jid = $1 AND is_from_bot = true AND quoted_msg_id = $2
 		 AND created_at > NOW() - INTERVAL '24 hours'`,
 		groupJid, stanzaId).Scan(&count)
-	if err != nil {
-		// Fallback: check Evolution's Message table
-		err = db.QueryRow(context.Background(),
-			`SELECT COUNT(*) FROM public."Message" 
-			 WHERE "key"->>'id' = $1 AND "key"->>'fromMe' = 'true'`,
-			stanzaId).Scan(&count)
-		if err != nil {
-			return false
-		}
-	}
+	
 	return count > 0
 }
 
-// IsRecentBotMessage checks if the quoted text matches a recent bot response
-// Uses prefix matching (first 100 chars) since quoted text might be truncated
 func IsRecentBotMessage(groupJid, quotedText string) bool {
 	if quotedText == "" || len(quotedText) < 10 {
 		return false
 	}
-	// Use first 100 chars for matching (quoted messages can be truncated)
 	matchText := quotedText
 	if len(matchText) > 100 {
 		matchText = matchText[:100]

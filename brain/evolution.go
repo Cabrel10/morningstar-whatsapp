@@ -34,7 +34,7 @@ func evoClient() (*resty.Client, string, string) {
 // SEND TEXT MESSAGE
 // ============================================================================
 
-func sendWhatsAppMessage(instance, remoteJid, text, quotedMsgId, participant string) error {
+func sendWhatsAppMessage(instance, remoteJid, text, quotedMsgId, participant string) (string, error) {
 	client, evoURL, _ := evoClient()
 
 	number := strings.Split(remoteJid, "@")[0]
@@ -58,24 +58,26 @@ func sendWhatsAppMessage(instance, remoteJid, text, quotedMsgId, participant str
 		body.Mentioned = []string{participant}
 	}
 
+	var result EvolutionResponse
 	resp, err := client.R().
 		SetBody(body).
+		SetResult(&result).
 		Post(fmt.Sprintf("%s/message/sendText/%s", evoURL, instance))
 
 	if err != nil {
 		fmt.Printf("[EVO] sendText error: %v\n", err)
-		return err
+		return "", err
 	}
 	if resp.IsError() {
 		fmt.Printf("[EVO] sendText API error: %s\n", resp.String())
-		return fmt.Errorf("evolution error: %s", resp.String())
+		return "", fmt.Errorf("evolution error: %s", resp.String())
 	}
 
-	return nil
+	return result.Key.Id, nil
 }
 
 // sendWhatsAppMessageWithMentions sends a message with multiple mentions
-func sendWhatsAppMessageWithMentions(instance, remoteJid, text string, mentions []string) error {
+func sendWhatsAppMessageWithMentions(instance, remoteJid, text string, mentions []string) (string, error) {
 	client, evoURL, _ := evoClient()
 
 	number := strings.Split(remoteJid, "@")[0]
@@ -86,28 +88,31 @@ func sendWhatsAppMessageWithMentions(instance, remoteJid, text string, mentions 
 		Mentioned: mentions,
 	}
 
+	var result EvolutionResponse
 	resp, err := client.R().
 		SetBody(body).
+		SetResult(&result).
 		Post(fmt.Sprintf("%s/message/sendText/%s", evoURL, instance))
 
 	if err != nil {
-		return err
+		return "", err
 	}
 	if resp.IsError() {
-		return fmt.Errorf("evolution error: %s", resp.String())
+		return "", fmt.Errorf("evolution error: %s", resp.String())
 	}
-	return nil
+	return result.Key.Id, nil
 }
 
 // ============================================================================
 // SEND MEDIA (image, video, audio, document)
 // ============================================================================
 
-func sendWhatsAppMedia(instance, remoteJid, mediaBase64, fileName, caption, mediaType string) error {
+func sendWhatsAppMedia(instance, remoteJid, mediaBase64, fileName, caption, mediaType string) (string, error) {
 	client, evoURL, _ := evoClient()
 
 	number := strings.Split(remoteJid, "@")[0]
 
+	var result EvolutionResponse
 	resp, err := client.R().
 		SetBody(EvolutionSendMediaRequest{
 			Number:    number,
@@ -117,38 +122,41 @@ func sendWhatsAppMedia(instance, remoteJid, mediaBase64, fileName, caption, medi
 			MediaType: mediaType,
 			Delay:     800,
 		}).
+		SetResult(&result).
 		Post(fmt.Sprintf("%s/message/sendMedia/%s", evoURL, instance))
 
 	if err != nil {
-		return err
+		return "", err
 	}
 	if resp.IsError() {
-		return fmt.Errorf("evolution media error: %s", resp.String())
+		return "", fmt.Errorf("evolution media error: %s", resp.String())
 	}
-	return nil
+	return result.Key.Id, nil
 }
 
 // sendWhatsAppAudio sends a voice message
-func sendWhatsAppAudio(instance, remoteJid string, audioBase64 string) error {
+func sendWhatsAppAudio(instance, remoteJid string, audioBase64 string) (string, error) {
 	client, evoURL, _ := evoClient()
 
 	number := strings.Split(remoteJid, "@")[0]
 
+	var result EvolutionResponse
 	resp, err := client.R().
 		SetBody(EvolutionSendAudioRequest{
 			Number: number,
 			Audio:  audioBase64,
 			Delay:  800,
 		}).
+		SetResult(&result).
 		Post(fmt.Sprintf("%s/message/sendWhatsAppAudio/%s", evoURL, instance))
 
 	if err != nil {
-		return err
+		return "", err
 	}
 	if resp.IsError() {
-		return fmt.Errorf("evolution audio error: %s", resp.String())
+		return "", fmt.Errorf("evolution audio error: %s", resp.String())
 	}
-	return nil
+	return result.Key.Id, nil
 }
 
 // ============================================================================

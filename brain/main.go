@@ -156,18 +156,32 @@ func handleWebhook(c echo.Context) error {
 	_ = json.Unmarshal(data.Message, &m)
 	text := GetMessageText(data.Message)
 
+	// DEBUG: Log raw message for replies analysis
+	if data.PushName != "" && strings.Contains(strings.ToLower(text), "poulga") == false {
+		b, _ := json.MarshalIndent(m, "", "  ")
+		fmt.Printf("[DEBUG] RAW_MESSAGE from %s: %s\n", data.PushName, string(b))
+	}
+
 	// Extract context info (quoted messages)
 	var ctxInfo *ContextInfo
-	if m.ContextInfo != nil {
+	if m.ContextInfo != nil { // Check root ContextInfo first
 		ctxInfo = m.ContextInfo
-	} else if m.ExtendedText != nil && m.ExtendedText.ContextInfo != nil {
-		ctxInfo = m.ExtendedText.ContextInfo
+	} else if m.ExtendedTextMessage != nil && m.ExtendedTextMessage.ContextInfo != nil {
+		ctxInfo = m.ExtendedTextMessage.ContextInfo
 	} else if m.ImageMessage != nil && m.ImageMessage.ContextInfo != nil {
 		ctxInfo = m.ImageMessage.ContextInfo
 	} else if m.VideoMessage != nil && m.VideoMessage.ContextInfo != nil {
 		ctxInfo = m.VideoMessage.ContextInfo
 	} else if m.AudioMessage != nil && m.AudioMessage.ContextInfo != nil {
 		ctxInfo = m.AudioMessage.ContextInfo
+	} else if m.DocumentMessage != nil && m.DocumentMessage.ContextInfo != nil {
+		ctxInfo = m.DocumentMessage.ContextInfo
+	}
+
+	// DEBUG: Log contextInfo details
+	if ctxInfo != nil {
+		fmt.Printf("[DEBUG] CONTEXT_INFO: Participant=%q StanzaId=%q QuotedMsg=%v MentionedJids=%v\n",
+			ctxInfo.Participant, ctxInfo.StanzaId, ctxInfo.QuotedMessage != nil, len(ctxInfo.MentionedJid))
 	}
 
 	// Build quoted info
@@ -179,8 +193,38 @@ func handleWebhook(c echo.Context) error {
 	if ctxInfo != nil {
 		quotedSender = ctxInfo.Participant
 		quotedMsgId = ctxInfo.StanzaId
-		quotedText = GetQuotedText(ctxInfo.QuotedMessage)
 		mentionedJids = ctxInfo.MentionedJid
+
+		// Extract quotedText from ctxInfo.QuotedMessage (which is 'any')
+		if ctxInfo.QuotedMessage != nil {
+			quotedMsgJSON, err := json.Marshal(ctxInfo.QuotedMessage)
+			if err == nil {
+				// The quotedMessage is a full MessageContent structure
+				var qm struct {
+					Conversation        string `json:"conversation"`
+					ExtendedTextMessage struct {
+						Text string `json:"text"`
+					} `json:"extendedTextMessage"`
+					ImageMessage struct {
+						Caption string `json:"caption"`
+					} `json:"imageMessage"`
+					VideoMessage struct {
+						Caption string `json:"caption"`
+					} `json:"videoMessage"`
+				}
+				if json.Unmarshal(quotedMsgJSON, &qm) == nil {
+					if qm.Conversation != "" {
+						quotedText = qm.Conversation
+					} else if qm.ExtendedTextMessage.Text != "" {
+						quotedText = qm.ExtendedTextMessage.Text
+					} else if qm.ImageMessage.Caption != "" {
+						quotedText = "[Image] " + qm.ImageMessage.Caption
+					} else if qm.VideoMessage.Caption != "" {
+						quotedText = "[Video] " + qm.VideoMessage.Caption
+					}
+				}
+			}
+		}
 	}
 
 	// ---- HANDLE REACTIONS (don't process further) ----
@@ -208,7 +252,7 @@ func handleWebhook(c echo.Context) error {
 	}
 
 	// ---- SAVE MESSAGE TO CONVERSATION HISTORY ----
-	go SaveMessage(remoteJid, senderJid, data.PushName, text, false, quotedMsgId)
+	go SaveMessage(msgId, remoteJid, senderJid, data.PushName, text, false, quotedMsgId)
 
 	// ---- ANTI-LINK CHECK ----
 	settings, _ := getGroupSettings(remoteJid)
@@ -245,34 +289,49 @@ func handleWebhook(c echo.Context) error {
 
 	// ---- DETECT REPLY TO BOT ----
 	isReplyToBot := false
-	
+
 	// Check if this message is a reply (has contextInfo with quotedMessage)
-	hasReply := (m.ExtendedText != nil && m.ExtendedText.ContextInfo != nil && 
-		m.ExtendedText.ContextInfo.QuotedMessage != nil) ||
-		(m.ImageMessage != nil && m.ImageMessage.ContextInfo != nil && 
-		m.ImageMessage.ContextInfo.QuotedMessage != nil) ||
-		(ctxInfo != nil && ctxInfo.QuotedMessage != nil)
-	
+	hasReply := (ctxInfo != nil && ctxInfo.QuotedMessage != nil)
+
+	fmt.Printf("[DEBUG] REPLY_CHECK: hasReply=%v ctxInfo=%v quotedMsg=%v\n",
+		hasReply, ctxInfo != nil, ctxInfo != nil && ctxInfo.QuotedMessage != nil)
+
 	if ctxInfo != nil && hasReply {
 		// Method 1: Check participant field (standard)
 		participant := ctxInfo.Participant
-		if strings.Contains(participant, "237620864894") || participant == botJid {
+		
+		// If participant is empty (happens in some Evolution API versions for private chats), 
+		// fallback to checking the quoted message metadata if available
+		
+		isBotParticipant := strings.Contains(participant, "237620864894") || (botJid != "" && participant == botJid)
+		
+		if isBotParticipant {
 			isReplyToBot = true
+			fmt.Printf("[DEBUG] REPLY_METHOD1_MATCHED\n")
 		}
-		// Method 2: If participant is empty but we have a quoted stanzaId,
-		// check our DB if that message was sent by the bot
+
+		// Method 2: Check stanzaId in our database
 		if !isReplyToBot && ctxInfo.StanzaId != "" {
+			fmt.Printf("[DEBUG] REPLY_METHOD2: checking stanzaId=%q in DB\n", ctxInfo.StanzaId)
 			if IsMessageFromBot(remoteJid, ctxInfo.StanzaId) {
 				isReplyToBot = true
+				fmt.Printf("[DEBUG] REPLY_METHOD2_MATCHED\n")
 			}
 		}
-		// Method 3: If participant is empty and no stanzaId match,
-		// check if quoted text matches a recent bot response
+
+		// Method 3: Text content matching (last resort)
 		if !isReplyToBot && quotedText != "" {
+			debugQuotedText := quotedText
+			if len(debugQuotedText) > 50 {
+				debugQuotedText = debugQuotedText[:50]
+			}
+			fmt.Printf("[DEBUG] REPLY_METHOD3: checking quotedText=%q\n", debugQuotedText)
 			if IsRecentBotMessage(remoteJid, quotedText) {
 				isReplyToBot = true
+				fmt.Printf("[DEBUG] REPLY_METHOD3_MATCHED\n")
 			}
 		}
+
 		if isReplyToBot {
 			fmt.Printf("[REPLY] Reply to Poulga detected from %s (participant=%q, stanzaId=%s)\n",
 				data.PushName, participant, ctxInfo.StanzaId)
@@ -372,39 +431,66 @@ func processLLMResponse(ctx MessageContext) {
 
 	// Fast reply check
 	if fastReply, ok := GetFastReply(ctx.Text); ok {
-		_ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, fastReply, ctx.MsgId, ctx.SenderJid)
+		botMsgId, _ := sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, fastReply, ctx.MsgId, ctx.SenderJid)
+		if botMsgId != "" {
+			go saveBotResponse(ctx, fastReply, botMsgId)
+		}
 		return
 	}
 
-	// Detect intent
+	// ======================================================================
+	// STEP 1: PRE-LLM TOOL DETECTION (keyword-based, instant)
+	// ======================================================================
+	if tc, ok := DetectToolFromKeywords(ctx.Text); ok {
+		fmt.Printf("[TOOL] PRE-LLM keyword match: tool=%q args=%q\n", tc.Tool, tc.Args)
+		result := ExecuteTool(tc, ctx)
+		if result.Response != "" {
+			botMsgId, _ := sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, result.Response, ctx.MsgId, ctx.SenderJid)
+			if botMsgId != "" {
+				go saveBotResponse(ctx, result.Response, botMsgId)
+			}
+		}
+		elapsed := time.Since(start)
+		fmt.Printf("[TOOL] Completed in %.1fs (pre-LLM)\n", elapsed.Seconds())
+		return
+	}
+
+	// ======================================================================
+	// STEP 2: INTENT DETECTION + CONTEXT GATHERING
+	// ======================================================================
 	intent := DetectIntent(ctx.Text, ctx.IsMentioned, ctx.IsReplyToBot)
 	fmt.Printf("[LLM] Intent: %s (%.0fms)\n", intent, float64(time.Since(start).Microseconds())/1000)
 
-	// Gather context from all memory levels
 	// Adaptive history: more context when user replies to bot (thread continuation)
 	historyLimit := 10
 	if ctx.IsReplyToBot {
-		historyLimit = 15 // More context for thread continuity
+		historyLimit = 15
 	}
 	history, _ := GetConversationContext(ctx.RemoteJid, historyLimit)
 	userMem, _ := GetUserMemory(ctx.SenderJid, ctx.RemoteJid)
 	groupMem, _ := GetGroupMemory(ctx.RemoteJid)
-	facts, _ := getFacts(ctx.RemoteJid)
+	groupFacts, err := GetGroupFacts(ctx.RemoteJid)
+	if err != nil {
+		fmt.Printf("[DB] Error getting group facts: %v\n", err)
+	}
 	summary, _ := GetLatestSummary(ctx.RemoteJid)
 	customPersona := GetGroupPersona(ctx.RemoteJid)
 
-	// Limit facts to avoid token overflow
-	if len(facts) > 3 {
-		facts = facts[:3]
+	// Convert GroupMemoryEntry slice to string slice for legacy Builders if needed
+	var factsLegacy []string
+	for _, f := range groupFacts {
+		factsLegacy = append(factsLegacy, fmt.Sprintf("%s: %s", f.Key, f.Value))
 	}
 
-	// Build prompt based on intent
+	// ======================================================================
+	// STEP 3: BUILD PROMPT (with Tool Catalog for chat/question intents)
+	// ======================================================================
 	var prompt string
 	switch intent {
 	case IntentGreeting:
 		prompt = BuildGreetingPrompt(ctx)
 	case IntentQuestion:
-		prompt = BuildQuestionPrompt(ctx, history, facts)
+		prompt = BuildQuestionPrompt(ctx, history, factsLegacy)
 	case IntentStory:
 		prompt = BuildStoryPrompt(ctx)
 	case IntentCode:
@@ -412,35 +498,68 @@ func processLLMResponse(ctx MessageContext) {
 	case IntentGame:
 		prompt = BuildGamePrompt(ctx, history)
 	case IntentSearch:
-		prompt = BuildSearchPrompt(ctx, facts, "")
+		prompt = BuildSearchPrompt(ctx, "")
 	case IntentSummary:
-		prompt = BuildSummaryPrompt("", history)
-	default: // IntentChat
-		prompt = BuildChatPrompt(ctx, history, userMem, groupMem, facts, summary, customPersona)
+		prompt = BuildSummaryPrompt(ctx, "", history)
+	default: // IntentChat — inject tool catalog
+		prompt = BuildChatPrompt(ctx, history, userMem, groupMem, factsLegacy, summary, customPersona)
+		// Inject tool catalog so LLM can output structured tool calls
+		prompt = prompt + "\n\n" + ToolCatalog
 	}
 
-	// Call Ollama with intent-tuned parameters
+	// ======================================================================
+	// STEP 4: CALL LLM
+	// ======================================================================
 	response, err := callOllamaWithIntent(prompt, intent, nil)
 	if err != nil {
-		fmt.Printf("[LLM] Ollama error: %v\n", err)
+		fmt.Printf("[LLM] ALL backends error: %v\n", err)
 		response = "Hmm, je n'ai pas pu reflechir a ca. Reessaie."
 	}
 
-	// Clean response
+	fmt.Printf("[RAW OLLAMA] %q\n", response)
+
+	// ======================================================================
+	// STEP 5: POST-LLM TOOL DETECTION (parse LLM structured output)
+	// ======================================================================
+	if tc, ok := ParseToolCall(response); ok {
+		fmt.Printf("[TOOL] POST-LLM tool call detected: tool=%q args=%q\n", tc.Tool, tc.Args)
+		result := ExecuteTool(tc, ctx)
+		if result.Response != "" {
+			botMsgId, _ := sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, result.Response, ctx.MsgId, ctx.SenderJid)
+			if botMsgId != "" {
+				go saveBotResponse(ctx, result.Response, botMsgId)
+			}
+		}
+		elapsed := time.Since(start)
+		fmt.Printf("[TOOL] Completed in %.1fs (post-LLM)\n", elapsed.Seconds())
+		return
+	}
+
+	// ======================================================================
+	// STEP 6: CLEAN + SEND (normal chat response, no tool call)
+	// ======================================================================
+	fmt.Printf("[BEFORE CLEAN] %q\n", response)
 	response = cleanResponse(response)
+	fmt.Printf("[AFTER CLEAN] %q\n", response)
 
 	elapsed := time.Since(start)
 	fmt.Printf("[LLM] Response sent (intent=%s, %.1fs, %d chars)\n", intent, elapsed.Seconds(), len(response))
 
-	// Send response
-	_ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, response, ctx.MsgId, ctx.SenderJid)
+	fmt.Printf("[SEND] %q\n", response)
+	botMsgId, _ := sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, response, ctx.MsgId, ctx.SenderJid)
 
-	// Save bot response to conversation history
+	if botMsgId != "" {
+		go saveBotResponse(ctx, response, botMsgId)
+	}
+}
+
+// saveBotResponse saves the bot's response to conversation history
+func saveBotResponse(ctx MessageContext, response string, botMsgId string) {
 	botJid := os.Getenv("BOT_JID")
 	if botJid == "" {
 		botJid = "237620864894@s.whatsapp.net"
 	}
-	go SaveMessage(ctx.RemoteJid, botJid, "Poulga", response, true, ctx.MsgId)
+	SaveMessage(botMsgId, ctx.RemoteJid, botJid, "Poulga", response, true, ctx.MsgId)
 }
 
 // ============================================================================
@@ -484,7 +603,10 @@ func handleWeeklySummary(c echo.Context) error {
 	profiles, _ := getMemberProfiles(remoteJid)
 	history, _ := GetConversationContext(remoteJid, 100)
 
-	prompt := BuildSummaryPrompt(profiles, history)
+	// Provide a dummy context for the summary builder
+	dummyCtx := MessageContext{RemoteJid: remoteJid}
+
+	prompt := BuildSummaryPrompt(dummyCtx, profiles, history)
 	response, err := callOllamaWithIntent(prompt, IntentSummary, nil)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
