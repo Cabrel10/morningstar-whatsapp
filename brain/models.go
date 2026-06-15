@@ -16,9 +16,10 @@ type WebhookPayload struct {
 }
 
 type MessageData struct {
-	Key      MessageKey      `json:"key"`
-	Message  json.RawMessage `json:"message"`
-	PushName string          `json:"pushName"`
+	Key         MessageKey      `json:"key"`
+	Message     json.RawMessage `json:"message"`
+	PushName    string          `json:"pushName"`
+	ContextInfo *ContextInfo    `json:"contextInfo,omitempty"` // Evolution v2.x place ceci ici !
 }
 
 type MessageKey struct {

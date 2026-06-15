@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -195,27 +197,52 @@ func handleCommand(ctx MessageContext, cmd, args string) {
 		if targetJid == "" {
 			targetJid = senderJid
 		}
+		
 		name := GetMemberName(targetJid, remoteJid, strings.Split(targetJid, "@")[0])
 		pts, _ := GetMemberPoints(targetJid, remoteJid)
 		roles, _ := GetMemberRoles(targetJid, remoteJid)
-		rolesStr := "Aucun badge"
-		if len(roles) > 0 {
-			rolesStr = strings.Join(roles, ", ")
+		
+		// Detailed profile from DB
+		profile, _ := GetUserProfile(targetJid)
+		
+		// Seniority
+		memberDetails, _ := GetMemberDetails(targetJid, remoteJid)
+		seniorityBadge := "🌱 Nouveau"
+		if !memberDetails.CreatedAt.IsZero() {
+			days := time.Since(memberDetails.CreatedAt).Hours() / 24
+			if days > 30 { seniorityBadge = "💎 Vétéran" } else if days > 7 { seniorityBadge = "🛡️ Habitué" }
 		}
+
+		rolesStr := "Membre standard"
+		if len(roles) > 0 { rolesStr = strings.Join(roles, ", ") }
+		
 		style := ResponseStyle{
-			Title:      fmt.Sprintf("Profil de %s", name),
+			Title:      "PROFIL DE " + strings.ToUpper(name),
 			TitleEmoji: "👤",
 			Sections: []Section{
 				{
-					Title:      "Informations",
-					TitleEmoji: "ℹ️",
-					Items: []string{
-						fmt.Sprintf("Identifiant : @%s", strings.Split(targetJid, "@")[0]),
-						fmt.Sprintf("Badges : *%s*", rolesStr),
-						fmt.Sprintf("Réputation : *%d points*", pts),
+					Title: "Statut & Identité", TitleEmoji: "🆔",
+					KeyValues: []KeyValue{
+						{Key: "Nom", Value: name, Emoji: "🏷️"},
+						{Key: "Rôle", Value: rolesStr, Emoji: "🛡️"},
+						{Key: "Ancienneté", Value: seniorityBadge, Emoji: "✨"},
+					},
+				},
+				{
+					Title: "Activité & Réputation", TitleEmoji: "📊",
+					KeyValues: []KeyValue{
+						{Key: "XP", Value: strconv.Itoa(pts) + " points", Emoji: "🏆"},
+						{Key: "Messages", Value: strconv.Itoa(memberDetails.MessageCount), Emoji: "💬"},
 					},
 				},
 			},
+			Footer: "Poulga Supreme Edition",
+		}
+		if profile.Profession != "" {
+			style.Sections = append(style.Sections, Section{
+				Title: "Détails Bio", TitleEmoji: "💼",
+				Content: "Métier : *" + profile.Profession + "*\nNote : " + profile.Facts,
+			})
 		}
 		response = RenderWhatsApp(style)
 
@@ -339,56 +366,185 @@ func handleCommand(ctx MessageContext, cmd, args string) {
 			response = "❌ Cette commande ne fonctionne que dans les groupes."
 			break
 		}
-		participants, err := getGroupMetadata(instance, remoteJid)
-		if err != nil {
-			response = "❌ Erreur de récupération des membres."
-			break
+		
+		members, err := GetGroupMembersDetailed(remoteJid)
+		if err != nil || len(members) == 0 {
+			// BEAUTIFUL FALLBACK if DB is empty
+			participants, err := getGroupMetadata(instance, remoteJid)
+			if err != nil {
+				response = "❌ Erreur de récupération des membres."
+				break
+			}
+			var mentions []string
+			var sb strings.Builder
+			
+			msgTitle := "📢 *APPEL GÉNÉRAL*"
+			if args != "" {
+				msgTitle = "📢 *" + strings.ToUpper(args) + "*"
+			}
+			
+			sb.WriteString(msgTitle + "\n")
+			sb.WriteString("━━━━━━━━━━━━━━━\n\n")
+			sb.WriteString("✨ *LISTE DES PRÉSENTS*\n")
+			
+			for _, p := range participants {
+				sb.WriteString(fmt.Sprintf("👤 @%s\n", strings.Split(p, "@")[0]))
+				mentions = append(mentions, p)
+			}
+			
+			sb.WriteString("\n━━━━━━━━━━━━━━━\n")
+			sb.WriteString("_Poulga a réveillé tout le monde._")
+			
+			_, _ = sendWhatsAppMessageWithMentions(instance, remoteJid, sb.String(), mentions)
+			return
 		}
+
 		var mentions []string
-		var sb strings.Builder
-		sb.WriteString("📢 *APPEL GÉNÉRAL*\n\n")
-		for _, p := range participants {
-			sb.WriteString(fmt.Sprintf("@%s ", strings.Split(p, "@")[0]))
-			mentions = append(mentions, p)
+		var veteranList []string
+		var activeList []string
+		var newList []string
+		
+		now := time.Now()
+		for _, m := range members {
+			mentions = append(mentions, m.Jid)
+			
+			days := now.Sub(m.CreatedAt).Hours() / 24
+			
+			// Display number without @s.whatsapp.net
+			num := strings.Split(m.Jid, "@")[0]
+			entry := fmt.Sprintf("• @%s (%d msgs)", num, m.MessageCount)
+			
+			if days > 30 {
+				veteranList = append(veteranList, "💎 "+entry)
+			} else if days > 7 {
+				activeList = append(activeList, "🛡️ "+entry)
+			} else {
+				newList = append(newList, "🆕 "+entry)
+			}
 		}
+
+		msgTitle := "📢 *CONVOCATION GÉNÉRALE*"
 		if args != "" {
-			sb.WriteString("\n\n*Message :* " + args)
+			msgTitle = "📢 *" + strings.ToUpper(args) + "*"
 		}
+
+		var sb strings.Builder
+		sb.WriteString(msgTitle + "\n")
+		sb.WriteString("━━━━━━━━━━━━━━━\n\n")
+
+		if len(veteranList) > 0 {
+			sb.WriteString("🏆 *LES PILIERS*\n")
+			for _, v := range veteranList { sb.WriteString(v + "\n") }
+			sb.WriteString("\n")
+		}
+		
+		if len(activeList) > 0 {
+			sb.WriteString("🔥 *LES HABITUÉS*\n")
+			for _, a := range activeList { sb.WriteString(a + "\n") }
+			sb.WriteString("\n")
+		}
+		
+		if len(newList) > 0 {
+			sb.WriteString("🌱 *LES NOUVEAUX*\n")
+			for _, n := range newList { sb.WriteString(n + "\n") }
+			sb.WriteString("\n")
+		}
+
+		sb.WriteString("━━━━━━━━━━━━━━━\n")
+		sb.WriteString("_Design by Poulga Supreme_")
+		
 		_, _ = sendWhatsAppMessageWithMentions(instance, remoteJid, sb.String(), mentions)
 		return
 
 	case "stats":
-		cartography, _ := getGroupCartography(remoteJid)
-		if cartography == "" {
+		members, err := GetGroupMembersDetailed(remoteJid)
+		if err != nil || len(members) == 0 {
 			response = "📈 Pas encore assez de données pour ce groupe."
+			break
+		}
+		
+		var topList []string
+		totalMsgs := 0
+		// Sort by message count already done in DB? No, GetGroupMembersDetailed sorts by CreatedAt
+		// Let's sort manually here or use a better query
+		
+		for i, m := range members {
+			if i < 7 { // Show top 7
+				topList = append(topList, fmt.Sprintf("%d. @%s — *%d msgs*", i+1, strings.Split(m.Jid, "@")[0], m.MessageCount))
+			}
+			totalMsgs += m.MessageCount
+		}
+		
+		style := ResponseStyle{
+			Title: "DASHBOARD DU GROUPE", TitleEmoji: "📊",
+			Sections: []Section{
+				{Title: "Activité Globale", TitleEmoji: "📈", Content: fmt.Sprintf("Total de messages analysés : *%d*", totalMsgs)},
+				{Title: "Top Membres", TitleEmoji: "🔥", Items: topList},
+				{Title: "Communauté", TitleEmoji: "👥", Content: fmt.Sprintf("Nombre d'identités suivies : *%d*", len(members))},
+			},
+		}
+		response = RenderWhatsApp(style)
+
+	case "top", "leaderboard":
+		rows, err := db.Query(context.Background(), `
+			SELECT jid, points FROM member_points 
+			WHERE group_jid = $1 ORDER BY points DESC LIMIT 10`, remoteJid)
+		if err != nil {
+			response = "❌ Erreur de récupération du classement."
+			break
+		}
+		defer rows.Close()
+
+		var items []string
+		i := 1
+		for rows.Next() {
+			var jid string
+			var pts int
+			if err := rows.Scan(&jid, &pts); err == nil {
+				name := GetMemberName(jid, remoteJid, strings.Split(jid, "@")[0])
+				medal := "🏅"
+				if i == 1 { medal = "🥇" } else if i == 2 { medal = "🥈" } else if i == 3 { medal = "🥉" }
+				items = append(items, fmt.Sprintf("%s *%s* : %d pts", medal, name, pts))
+				i++
+			}
+		}
+
+		if len(items) == 0 {
+			response = "🏆 Aucun point attribué pour le moment. Jouez pour en gagner !"
 		} else {
 			style := ResponseStyle{
-				Title:      "Statistiques du Groupe",
-				TitleEmoji: "📊",
-				Sections: []Section{
-					{Content: cartography},
-				},
+				Title:      "CLASSEMENT DE RÉPUTATION",
+				TitleEmoji: "🏆",
+				Sections:   []Section{{Items: items}},
+				Footer:     "Gagne des points en jouant aux jeux !",
 			}
 			response = RenderWhatsApp(style)
 		}
 
-	case "memoire", "faits":
+	// Alias pour la mémoire
+	case "memoire", "faits", "facts":
 		facts, _ := GetGroupFacts(remoteJid)
 		if len(facts) == 0 {
-			response = "🧠 Ma mémoire est vide pour ce groupe. Utilise `.fact <clé> : <valeur>` pour m'apprendre des choses !"
+			response = RenderWhatsApp(ResponseStyle{
+				Title:      "Mémoire",
+				TitleEmoji: "🧠",
+				Sections: []Section{
+					{Content: "Ma mémoire est vide pour ce groupe."},
+					{Content: "Utilise `.fact <clé> : <valeur>` pour m'apprendre des choses !"},
+				},
+			})
 		} else {
 			var list []string
 			for _, f := range facts {
-				list = append(list, fmt.Sprintf("*%s* : %s", f.Key, f.Value))
+				list = append(list, fmt.Sprintf("*%s* → %s", f.Key, f.Value))
 			}
-			style := ResponseStyle{
+			response = RenderWhatsApp(ResponseStyle{
 				Title:      "Mémoire du Groupe",
 				TitleEmoji: "🧠",
 				Sections: []Section{
-					{Items: list},
+					{Title: fmt.Sprintf("%d faits retenus", len(list)), TitleEmoji: "📚", Items: list},
 				},
-			}
-			response = RenderWhatsApp(style)
+			})
 		}
 
 	case "fact":
@@ -421,6 +577,19 @@ func handleCommand(ctx MessageContext, cmd, args string) {
 			response = fmt.Sprintf("✅ J'ai mémorisé : *%s*.", key)
 		}
 
+	// Le jeu interactif (Morpion)
+	case "jeu", "morpion", "tictactoe":
+		go handleMorpionGame(ctx, args)
+		return
+
+	case "pendu", "hangman":
+		go handlePenduGame(ctx, args)
+		return
+
+	case "quiz", "quizz":
+		go handleQuizGame(ctx, args)
+		return
+
 	case "bienvenue":
 		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
 		if !isAdmin {
@@ -449,6 +618,79 @@ func handleCommand(ctx MessageContext, cmd, args string) {
 		}
 		response = fmt.Sprintf("🛡️ Anti-lien *%s*.", status)
 
+	case "outils", "tools":
+		style := ResponseStyle{
+			Title:      "Capacités Techniques",
+			TitleEmoji: "🛠️",
+			Sections: []Section{
+				{
+					Title: "Navigation & Recherche", TitleEmoji: "🌐",
+					Items: []string{
+						"`.lire [url]` — Analyse complète d'un site web",
+						"`.google [recherche]` — Recherche web en temps réel",
+					},
+				},
+				{
+					Title: "Mémoire & Organisation", TitleEmoji: "🧠",
+					Items: []string{
+						"`.fact [clé] : [valeur]` — Apprendre une information au bot",
+						"`.note [texte]` — Enregistrer une note personnelle",
+						"`.rappel [texte]` — Créer un rappel",
+					},
+				},
+				{
+					Title: "Social & Interaction", TitleEmoji: "🎮",
+					Items: []string{
+						"`.top` — Voir le classement des membres",
+						"`.jeu` / `.quiz` / `.pendu` — Lancer un jeu",
+						"`.sondage Q?|O1|O2` — Créer un sondage",
+						"`.sticker` — Convertir une image citée",
+					},
+				},
+			},
+			Footer: "Poulga Intelligent Engine",
+		}
+		response = RenderWhatsApp(style)
+
+	case "evolve":
+		isAdmin, _ := isUserAdmin(instance, remoteJid, senderJid)
+		if !isAdmin {
+			response = "👑 Réservé aux admins."
+			break
+		}
+		if args == "analyse" || args == "analyze" {
+			go handleEvolveAnalyse(ctx)
+			return
+		}
+		
+		// List suggestions
+		rows, err := db.Query(context.Background(), "SELECT id, suggestion, reason FROM bot_suggestions WHERE group_jid = $1 AND status = 'pending' ORDER BY created_at DESC", remoteJid)
+		if err != nil {
+			response = "❌ Erreur de lecture des suggestions."
+			break
+		}
+		defer rows.Close()
+		
+		var items []string
+		for rows.Next() {
+			var id int
+			var sug, reason string
+			if err := rows.Scan(&id, &sug, &reason); err == nil {
+				items = append(items, fmt.Sprintf("*[%d]* : %s\n_Pourquoi : %s_", id, sug, reason))
+			}
+		}
+		
+		if len(items) == 0 {
+			response = "💡 *Aucune suggestion pour le moment.*\nUtilise `.evolve analyse` pour que j'étudie le groupe !"
+		} else {
+			style := ResponseStyle{
+				Title: "Suggestions d'Amélioration", TitleEmoji: "💡",
+				Sections: []Section{{Items: items}},
+				Footer: "Utilise .evolve clear pour tout oublier.",
+			}
+			response = RenderWhatsApp(style)
+		}
+
 	case "aide", "help", "menu":
 		style := ResponseStyle{
 			Title:      "Menu d'Aide Poulga",
@@ -457,7 +699,7 @@ func handleCommand(ctx MessageContext, cmd, args string) {
 				{
 					Title:      "Identité & Profil",
 					TitleEmoji: "👥",
-					Items:      []string{".aide", ".qui-es-tu", ".je-suis <Nom>", ".qui", ".profil", ".stats"},
+					Items:      []string{".aide", ".outils", ".qui-es-tu", ".je-suis <Nom>", ".qui", ".profil", ".stats", ".top"},
 				},
 				{
 					Title:      "Outils & Utilitaires",
@@ -467,12 +709,12 @@ func handleCommand(ctx MessageContext, cmd, args string) {
 				{
 					Title:      "Web & Recherche",
 					TitleEmoji: "🌐",
-					Items:      []string{".lire <url>", ".google <recherche>", ".recherche <terme>", ".resume"},
+					Items:      []string{".lire <url>", ".google <recherche>", ".resume"},
 				},
 				{
 					Title:      "Média & Fun",
 					TitleEmoji: "📥",
-					Items:      []string{".yt <url>", ".audio <url>", ".sticker", ".jeu"},
+					Items:      []string{".yt <url>", ".audio <url>", ".sticker", ".jeu", ".pendu", ".quiz"},
 				},
 				{
 					Title:      "Mémoire & Faits",
@@ -502,13 +744,14 @@ func handleCommand(ctx MessageContext, cmd, args string) {
 			TitleEmoji: "💻",
 			Sections: []Section{
 				{
-					Items: []string{
-						fmt.Sprintf("Uptime : %s", strings.TrimSpace(string(uptimeOut))),
-						fmt.Sprintf("CPU : %s%%", strings.TrimSpace(string(cpuOut))),
-						fmt.Sprintf("RAM : %s", strings.TrimSpace(string(memOut))),
+					KeyValues: []KeyValue{
+						{Key: "Uptime", Value: strings.TrimSpace(string(uptimeOut)), Emoji: "⏱️"},
+						{Key: "CPU", Value: strings.TrimSpace(string(cpuOut)) + "%", Emoji: "🧠"},
+						{Key: "RAM", Value: strings.TrimSpace(string(memOut)), Emoji: "💾"},
 					},
 				},
 			},
+			Footer: "MorningStar Infrastructure",
 		}
 		response = RenderWhatsApp(style)
 
@@ -610,9 +853,9 @@ func handleCommand(ctx MessageContext, cmd, args string) {
 			response = RenderWhatsApp(style)
 			break
 		}
-		url := strings.TrimSpace(args)
+		targetURL := strings.TrimSpace(args)
 		_, _ = sendWhatsAppMessage(instance, remoteJid, "🔍 *Lecture du site en cours...*", "", senderJid)
-		content, err := scrapeURL(url)
+		content, err := scrapeURL(targetURL)
 		if err != nil {
 			style := ResponseStyle{
 				Title:      "Échec de navigation",
@@ -628,7 +871,21 @@ func handleCommand(ctx MessageContext, cmd, args string) {
 			if err != nil {
 				response = "❌ Erreur de synthèse."
 			} else {
-				response = cleanResponse(resp)
+				resp = cleanResponse(resp)
+				response = RenderWhatsApp(ResponseStyle{
+					Title:      "Synthèse de Lecture Web",
+					TitleEmoji: "🌐",
+					Sections: []Section{
+						{
+							Content: fmt.Sprintf("✅ *[Poulga a visité et lu avec succès le lien suivant]* :\n🔗 %s", targetURL),
+						},
+						{
+							Title:      "Analyse du Contenu",
+							TitleEmoji: "📝",
+							Content:    resp,
+						},
+					},
+				})
 			}
 		}
 
@@ -723,7 +980,7 @@ func handleCommand(ctx MessageContext, cmd, args string) {
 	}
 
 	if response != "" {
-		_, _ = sendWhatsAppMessage(instance, remoteJid, response, msgId, senderJid)
+		_, _ = sendAndSaveBotMessage(ctx, response, msgId)
 	}
 }
 
@@ -732,24 +989,26 @@ func handleCommand(ctx MessageContext, cmd, args string) {
 // ============================================================================
 
 func handleWebSearchCommand(ctx MessageContext, query string) {
-	_, _ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, "🔎 *Recherche sur le web...*", "", ctx.SenderJid)
+	_, _ = sendAndSaveBotMessage(ctx, "🔎 *Recherche sur le web...*", "")
 
-	// We can use a simple Google Search link scraper or a dedicated search API
-	// For now, let's use a very basic search results extractor or just provide a summary of what's found
-	// Since we don't have a Search API key, we will simulate a search via scraping or just use LLM for synthesis
-	
-	searchURL := fmt.Sprintf("https://www.google.com/search?q=%s", strings.ReplaceAll(query, " ", "+"))
-	content, err := scrapeURL(searchURL)
+	results, err := WebSearch(query, 5)
 	if err != nil {
-		_, _ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, "❌ Erreur de recherche.", ctx.MsgId, ctx.SenderJid)
+		fmt.Printf("[SEARCH] Error: %v\n", err)
+		_, _ = sendAndSaveBotMessage(ctx, "❌ Erreur lors de la recherche web.", ctx.MsgId)
 		return
 	}
 
-	prompt := fmt.Sprintf("Voici les résultats d'une recherche Google pour '%s' : %s\n\nSynthétise les informations les plus pertinentes.", query, content)
-	resp, err := callOllamaWithIntent(prompt, IntentSearch, nil)
-	if err == nil {
-		_, _ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, cleanResponse(resp), ctx.MsgId, ctx.SenderJid)
+	if len(results) == 0 {
+		_, _ = sendAndSaveBotMessage(ctx, "🔍 Aucun résultat trouvé pour cette recherche.", ctx.MsgId)
+		return
 	}
+
+	// Format results for WhatsApp
+	formatted := FormatSearchResults(query, results)
+	
+	// Optional: Let LLM synthesize if needed, but the formatted results are often enough.
+	// For now, let's send the formatted results directly for speed and reliability.
+	_, _ = sendAndSaveBotMessage(ctx, formatted, ctx.MsgId)
 }
 
 func handleSearchCommand(ctx MessageContext, query string) {
@@ -757,7 +1016,7 @@ func handleSearchCommand(ctx MessageContext, query string) {
 	prompt := BuildSearchPrompt(ctx, query)
 	resp, err := callOllamaWithIntent(prompt, IntentSearch, nil)
 	if err == nil {
-		_, _ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, cleanResponse(resp), ctx.MsgId, ctx.SenderJid)
+		_, _ = sendAndSaveBotMessage(ctx, cleanResponse(resp), ctx.MsgId)
 	}
 }
 
@@ -769,7 +1028,7 @@ func handleSummaryCommand(ctx MessageContext) {
 		prompt := BuildSummaryPrompt(ctx, profiles, history)
 		resp, err := callOllamaWithIntent(prompt, IntentSummary, nil)
 		if err == nil {
-			_, _ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, cleanResponse(resp), ctx.MsgId, ctx.SenderJid)
+			_, _ = sendAndSaveBotMessage(ctx, cleanResponse(resp), ctx.MsgId)
 		}
 	}
 }
@@ -780,7 +1039,7 @@ func handleCodeCommand(ctx MessageContext, args string) {
 	prompt := BuildCodePrompt(ctx)
 	resp, err := callOllamaWithIntent(prompt, IntentCode, nil)
 	if err == nil {
-		_, _ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, cleanResponse(resp), ctx.MsgId, ctx.SenderJid)
+		_, _ = sendAndSaveBotMessage(ctx, cleanResponse(resp), ctx.MsgId)
 	}
 }
 
@@ -789,16 +1048,34 @@ func handleStickerCommand(ctx MessageContext) {
 	if target == "" {
 		target = ctx.MsgId
 	}
+
+	// Notify user we are working on it
+	// _, _ = sendAndSaveBotMessage(ctx, "🎨 *Création du sticker...*", ctx.MsgId)
+
 	b64, err := getMediaBase64(ctx.Instance, target)
-	if err == nil {
-		_ = sendSticker(ctx.Instance, ctx.RemoteJid, b64)
+	if err != nil {
+		fmt.Printf("[STICKER] Error fetching media: %v\n", err)
+		_, _ = sendAndSaveBotMessage(ctx, "❌ Impossible de récupérer l'image. Assure-toi de bien citer une image ou d'en envoyer une.", ctx.MsgId)
+		return
+	}
+
+	err = sendSticker(ctx.Instance, ctx.RemoteJid, b64)
+	if err != nil {
+		fmt.Printf("[STICKER] Error sending sticker: %v\n", err)
+		_, _ = sendAndSaveBotMessage(ctx, "❌ Erreur lors de la conversion en sticker.", ctx.MsgId)
+	} else {
+		botJid := os.Getenv("BOT_JID")
+		if botJid == "" {
+			botJid = "237620864894@s.whatsapp.net"
+		}
+		_ = SaveMessage("sticker_"+time.Now().String(), ctx.RemoteJid, botJid, "Poulga", "[Sticker]", true, ctx.MsgId)
 	}
 }
 
 func handleDownload(ctx MessageContext, cmd, url string) {
 	fmt.Printf("[DOWNLOAD] %s | url=%s\n", cmd, url)
 
-	_, _ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, "⏳ Téléchargement en cours...", ctx.MsgId, ctx.SenderJid)
+	_, _ = sendAndSaveBotMessage(ctx, "⏳ Téléchargement en cours...", ctx.MsgId)
 
 	outputFile := fmt.Sprintf("/tmp/poulga_%d", time.Now().UnixNano())
 	var ytdlpArgs []string
@@ -812,7 +1089,6 @@ func handleDownload(ctx MessageContext, cmd, url string) {
 		"--max-filesize", "50M",
 		"--socket-timeout", "30",
 		"--retries", "3",
-		"--extractor-args", "youtube:player_client=web,mweb",
 		"-o", outputFile + ".%(ext)s",
 	}
 
@@ -855,13 +1131,13 @@ func handleDownload(ctx MessageContext, cmd, url string) {
 				{Content: errorContent},
 			},
 		}
-		_, _ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, RenderWhatsApp(style), ctx.MsgId, ctx.SenderJid)
+		_, _ = sendAndSaveBotMessage(ctx, RenderWhatsApp(style), ctx.MsgId)
 		return
 	}
 
 	matches, _ := filepath.Glob(outputFile + ".*")
 	if len(matches) == 0 {
-		_, _ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, "❌ Fichier introuvable.", ctx.MsgId, ctx.SenderJid)
+		_, _ = sendAndSaveBotMessage(ctx, "❌ Fichier introuvable.", ctx.MsgId)
 		return
 	}
 	realPath := matches[0]
@@ -869,24 +1145,545 @@ func handleDownload(ctx MessageContext, cmd, url string) {
 
 	data, err := os.ReadFile(realPath)
 	if err != nil {
-		_, _ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, "❌ Erreur lecture.", ctx.MsgId, ctx.SenderJid)
+		_, _ = sendAndSaveBotMessage(ctx, "❌ Erreur lecture.", ctx.MsgId)
 		return
 	}
 
 	base64Data := base64.StdEncoding.EncodeToString(data)
-	_, err = sendWhatsAppMedia(ctx.Instance, ctx.RemoteJid, base64Data, filepath.Base(realPath), "", mediaType)
+	botMsgId, err := sendWhatsAppMedia(ctx.Instance, ctx.RemoteJid, base64Data, filepath.Base(realPath), "", mediaType)
 	if err != nil {
-		_, _ = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, "❌ Erreur envoi.", ctx.MsgId, ctx.SenderJid)
+		_, _ = sendAndSaveBotMessage(ctx, "❌ Erreur envoi.", ctx.MsgId)
+	} else if botMsgId != "" {
+		botJid := os.Getenv("BOT_JID")
+		if botJid == "" {
+			botJid = "237620864894@s.whatsapp.net"
+		}
+		_ = SaveMessage(botMsgId, ctx.RemoteJid, botJid, "Poulga", "[Média: "+mediaType+"]", true, ctx.MsgId)
 	}
+}
+
+func handleEvolveAnalyse(ctx MessageContext) {
+	_, _ = sendAndSaveBotMessage(ctx, "🧠 *Analyse des dynamiques du groupe en cours...*", "")
+
+	history, _ := GetConversationContext(ctx.RemoteJid, 40)
+	historyStr := FormatConversationHistory(history)
+
+	prompt := fmt.Sprintf(`Tu es Poulga, l'IA associée de ce groupe. Analyse l'historique suivant et propose UNE SEULE amélioration concrète pour rendre le groupe plus actif, mieux géré ou plus fun.
+	
+Historique :
+%s
+
+Réponds UNIQUEMENT au format JSON suivant :
+{
+  "suggestion": "Titre court de l'idée",
+  "reason": "Explication courte du pourquoi"
+}`, historyStr)
+
+	resp, err := callOllamaWithIntent(prompt, IntentChat, nil)
+	if err != nil {
+		_, _ = sendAndSaveBotMessage(ctx, "❌ Échec de l'analyse.", ctx.MsgId)
+		return
+	}
+
+	// Simple JSON extraction
+	var sugData struct {
+		Suggestion string `json:"suggestion"`
+		Reason     string `json:"reason"`
+	}
+	
+	// Find JSON in response
+	startIdx := strings.Index(resp, "{")
+	endIdx := strings.LastIndex(resp, "}")
+	if startIdx != -1 && endIdx != -1 && endIdx > startIdx {
+		jsonStr := resp[startIdx : endIdx+1]
+		err = json.Unmarshal([]byte(jsonStr), &sugData)
+	}
+
+	if err != nil || sugData.Suggestion == "" {
+		// Fallback if LLM didn't return perfect JSON
+		sugData.Suggestion = "Amélioration des interactions"
+		sugData.Reason = cleanResponse(resp)
+	}
+
+	err = saveBotSuggestion(ctx.RemoteJid, sugData.Suggestion, sugData.Reason)
+	if err != nil {
+		_, _ = sendAndSaveBotMessage(ctx, "❌ Erreur lors de l'enregistrement de l'idée.", ctx.MsgId)
+	} else {
+		style := ResponseStyle{
+			Title: "Nouvelle Idée d'Évolution", TitleEmoji: "💡",
+			Sections: []Section{
+				{Title: sugData.Suggestion, Content: sugData.Reason},
+			},
+			Footer: "Tape .evolve pour voir toutes les idées.",
+		}
+		_, _ = sendAndSaveBotMessage(ctx, RenderWhatsApp(style), ctx.MsgId)
+	}
+}
+
+func saveBotSuggestion(groupJid, suggestion, reason string) error {
+	_, err := db.Exec(context.Background(),
+		"INSERT INTO bot_suggestions (group_jid, suggestion, reason) VALUES ($1, $2, $3)",
+		groupJid, suggestion, reason)
+	return err
 }
 
 func extractJid(args string, quoted string) string {
 	if quoted != "" {
 		return quoted
 	}
-	target := strings.TrimPrefix(strings.Fields(args)[0], "@")
+	fields := strings.Fields(args)
+	if len(fields) == 0 {
+		return ""
+	}
+	target := strings.TrimPrefix(fields[0], "@")
 	if !strings.Contains(target, "@") {
 		target += "@s.whatsapp.net"
 	}
 	return target
+}
+
+type MorpionState struct {
+	Grid   [3][3]string `json:"grid"`
+	Turn   string       `json:"turn"` // "user" ou "bot"
+	Active bool         `json:"active"`
+}
+
+func handleMorpionGame(ctx MessageContext, args string) {
+	key := fmt.Sprintf("game:morpion:%s", ctx.RemoteJid)
+	fmt.Printf("[GAME] handleMorpionGame key=%s args=%q\n", key, args)
+
+	// 1. Démarrer une nouvelle partie
+	if args == "" || strings.ToLower(args) == "reset" || strings.ToLower(args) == "start" {
+		fmt.Printf("[GAME] Starting new game for %s\n", ctx.RemoteJid)
+		state := MorpionState{
+			Grid:   [3][3]string{{"-", "-", "-"}, {"-", "-", "-"}, {"-", "-", "-"}},
+			Turn:   "user",
+			Active: true,
+		}
+		saveMorpionState(key, state)
+
+		style := ResponseStyle{
+			Title:      "Morpion (Tic-Tac-Toe)",
+			TitleEmoji: "❌",
+			Sections: []Section{
+				{Content: "🎮 *La partie commence !* Tu joues les *❌* et Poulga joue les *⭕*.\n\nPour jouer, réponds avec les coordonnées de la case (ligne,colonne).\n👉 Exemple : `.jeu 2,2` (pour jouer au centre)"},
+				{Content: renderMorpionGrid(state.Grid)},
+			},
+		}
+		_, _ = sendAndSaveBotMessage(ctx, RenderWhatsApp(style), ctx.MsgId)
+		return
+	}
+
+	// 2. Récupérer la partie en cours
+	state, found := getMorpionState(key)
+	if !found || !state.Active {
+		_, _ = sendAndSaveBotMessage(ctx, "⚠️ *Aucune partie en cours !* Écris `.jeu` ou `.jeu start` pour commencer. 🎮", ctx.MsgId)
+		return
+	}
+
+	// 3. Parser le coup de l'utilisateur (format: l,c)
+	parts := strings.Split(strings.TrimSpace(args), ",")
+	if len(parts) != 2 {
+		_, _ = sendAndSaveBotMessage(ctx, "⚠️ *Coordonnées invalides !* Utilise le format : `ligne,colonne` (ex: `.jeu 1,3`).", ctx.MsgId)
+		return
+	}
+	r, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+	c, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err1 != nil || err2 != nil || r < 1 || r > 3 || c < 1 || c > 3 {
+		_, _ = sendAndSaveBotMessage(ctx, "⚠️ Les lignes et colonnes doivent être comprises entre *1 et 3*.", ctx.MsgId)
+		return
+	}
+
+	rIdx, cIdx := r - 1, c - 1
+	if state.Grid[rIdx][cIdx] != "-" {
+		_, _ = sendAndSaveBotMessage(ctx, "⚠️ *Case déjà occupée !* Choisis une autre coordonnée.", ctx.MsgId)
+		return
+	}
+
+	// Appliquer le coup de l'utilisateur
+	state.Grid[rIdx][cIdx] = "X"
+
+	// Vérifier la victoire de l'utilisateur
+	if checkMorpionWinner(state.Grid, "X") {
+		state.Active = false
+		saveMorpionState(key, state)
+		style := ResponseStyle{
+			Title:      "Morpion — Victoire !",
+			TitleEmoji: "🏆",
+			Sections: []Section{
+				{Content: fmt.Sprintf("🎉 Félicitations @%s, tu as battu Poulga !", strings.Split(ctx.SenderJid, "@")[0])},
+				{Content: renderMorpionGrid(state.Grid)},
+			},
+		}
+		_, _ = sendAndSaveBotMessage(ctx, RenderWhatsApp(style), ctx.MsgId)
+		return
+	}
+
+	// Vérifier si la grille est pleine (Match nul)
+	if isMorpionGridFull(state.Grid) {
+		state.Active = false
+		saveMorpionState(key, state)
+		style := ResponseStyle{
+			Title:      "Morpion — Match Nul",
+			TitleEmoji: "🤝",
+			Sections: []Section{
+				{Content: "La grille est pleine. Bien joué !"},
+				{Content: renderMorpionGrid(state.Grid)},
+			},
+		}
+		_, _ = sendAndSaveBotMessage(ctx, RenderWhatsApp(style), ctx.MsgId)
+		return
+	}
+
+	// 4. Tour du Bot (Intelligence Artificielle Minimax)
+	botRow, botCol := getBestMorpionMove(state.Grid)
+	state.Grid[botRow][botCol] = "O"
+
+	// Vérifier la victoire du Bot
+	if checkMorpionWinner(state.Grid, "O") {
+		state.Active = false
+		saveMorpionState(key, state)
+		style := ResponseStyle{
+			Title:      "Morpion — Poulga l'emporte",
+			TitleEmoji: "⭕",
+			Sections: []Section{
+				{Content: "Désolée, j'ai gagné cette manche ! Mieux vaut de la chance au jeu qu'en amour. 😉"},
+				{Content: renderMorpionGrid(state.Grid)},
+			},
+		}
+		_, _ = sendAndSaveBotMessage(ctx, RenderWhatsApp(style), ctx.MsgId)
+		return
+	}
+
+	saveMorpionState(key, state)
+	style := ResponseStyle{
+		Title:      "Morpion (À toi de jouer)",
+		TitleEmoji: "❌",
+		Sections: []Section{
+			{Content: fmt.Sprintf("Poulga a joué en *%d,%d*. C'est ton tour !", botRow+1, botCol+1)},
+			{Content: renderMorpionGrid(state.Grid)},
+		},
+	}
+	_, _ = sendAndSaveBotMessage(ctx, RenderWhatsApp(style), ctx.MsgId)
+}
+
+// Helpers Morpion
+func renderMorpionGrid(grid [3][3]string) string {
+	var sb strings.Builder
+	for r := 0; r < 3; r++ {
+		for c := 0; c < 3; c++ {
+			switch grid[r][c] {
+			case "X":
+				sb.WriteString("❌")
+			case "O":
+				sb.WriteString("⭕")
+			default:
+				sb.WriteString("⬜")
+			}
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+func checkMorpionWinner(g [3][3]string, s string) bool {
+	for i := 0; i < 3; i++ {
+		if g[i][0] == s && g[i][1] == s && g[i][2] == s {
+			return true
+		}
+		if g[0][i] == s && g[1][i] == s && g[2][i] == s {
+			return true
+		}
+	}
+	if g[0][0] == s && g[1][1] == s && g[2][2] == s {
+		return true
+	}
+	if g[0][2] == s && g[1][1] == s && g[2][0] == s {
+		return true
+	}
+	return false
+}
+
+func isMorpionGridFull(g [3][3]string) bool {
+	for r := 0; r < 3; r++ {
+		for c := 0; c < 3; c++ {
+			if g[r][c] == "-" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// sendAndSaveBotMessage sends a message and persists it to history
+func sendAndSaveBotMessage(ctx MessageContext, text string, quotedMsgId string) (string, error) {
+	botMsgId, err := sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, text, quotedMsgId, ctx.SenderJid)
+	if err == nil && botMsgId != "" {
+		botJid := os.Getenv("BOT_JID")
+		if botJid == "" {
+			botJid = "237620864894@s.whatsapp.net"
+		}
+		// Save to DB
+		_ = SaveMessage(botMsgId, ctx.RemoteJid, botJid, "Poulga", text, true, quotedMsgId)
+	}
+	return botMsgId, err
+}
+
+func getBestMorpionMove(g [3][3]string) (int, int) {
+	// Minimax implementation for a perfect AI
+	bestScore := -1000
+	var move [2]int
+	move[0], move[1] = -1, -1
+
+	for r := 0; r < 3; r++ {
+		for c := 0; c < 3; c++ {
+			if g[r][c] == "-" {
+				g[r][c] = "O"
+				score := minimax(g, 0, false)
+				g[r][c] = "-"
+				if score > bestScore {
+					bestScore = score
+					move[0], move[1] = r, c
+				}
+			}
+		}
+	}
+
+	if move[0] == -1 {
+		return 0, 0
+	}
+	return move[0], move[1]
+}
+
+func minimax(g [3][3]string, depth int, isMaximizing bool) int {
+	if checkMorpionWinner(g, "O") { return 10 - depth }
+	if checkMorpionWinner(g, "X") { return depth - 10 }
+	if isMorpionGridFull(g) { return 0 }
+
+	if isMaximizing {
+		bestScore := -1000
+		for r := 0; r < 3; r++ {
+			for c := 0; c < 3; c++ {
+				if g[r][c] == "-" {
+					g[r][c] = "O"
+					score := minimax(g, depth+1, false)
+					g[r][c] = "-"
+					if score > bestScore { bestScore = score }
+				}
+			}
+		}
+		return bestScore
+	} else {
+		bestScore := 1000
+		for r := 0; r < 3; r++ {
+			for c := 0; c < 3; c++ {
+				if g[r][c] == "-" {
+					g[r][c] = "X"
+					score := minimax(g, depth+1, true)
+					g[r][c] = "-"
+					if score < bestScore { bestScore = score }
+				}
+			}
+		}
+		return bestScore
+	}
+}
+
+func saveMorpionState(key string, s MorpionState) {
+	data, _ := json.Marshal(s)
+	rdb.Set(context.Background(), key, string(data), 15*time.Minute)
+}
+
+func getMorpionState(key string) (MorpionState, bool) {
+	val, err := rdb.Get(context.Background(), key).Result()
+	if err != nil { return MorpionState{}, false }
+	var s MorpionState
+	json.Unmarshal([]byte(val), &s)
+	return s, true
+}
+
+type PenduState struct {
+	Word      string   `json:"word"`
+	Guessed   []string `json:"guessed"`
+	Attempts  int      `json:"attempts"`
+	Active    bool     `json:"active"`
+}
+
+func handlePenduGame(ctx MessageContext, args string) {
+	key := fmt.Sprintf("game:pendu:%s", ctx.RemoteJid)
+	
+	// Start new game
+	if args == "" || strings.ToLower(args) == "start" {
+		word := PenduWords[rand.Intn(len(PenduWords))]
+		state := PenduState{
+			Word:     word,
+			Guessed:  []string{},
+			Attempts: 0,
+			Active:   true,
+		}
+		savePenduState(key, state)
+		
+		response := "🎮 *Nouveau Pendu démarré !*\n\nMot à deviner :\n`" + renderPenduWord(state) + "`\n\nPropose une lettre avec `.pendu <lettre>`"
+		_, _ = sendAndSaveBotMessage(ctx, response, ctx.MsgId)
+		return
+	}
+
+	state, found := getPenduState(key)
+	if !found || !state.Active {
+		_, _ = sendAndSaveBotMessage(ctx, "⚠️ Aucune partie de Pendu en cours. Tape `.pendu start`.", ctx.MsgId)
+		return
+	}
+
+	// Process guess
+	guess := strings.ToUpper(strings.TrimSpace(args))
+	if len(guess) != 1 {
+		_, _ = sendAndSaveBotMessage(ctx, "⚠️ Propose une seule lettre !", ctx.MsgId)
+		return
+	}
+
+	// Check if already guessed
+	for _, l := range state.Guessed {
+		if l == guess {
+			_, _ = sendAndSaveBotMessage(ctx, "⚠️ Tu as déjà proposé la lettre "+guess+".", ctx.MsgId)
+			return
+		}
+	}
+
+	state.Guessed = append(state.Guessed, guess)
+	
+	// Check if correct
+	foundInWord := false
+	for i := 0; i < len(state.Word); i++ {
+		if string(state.Word[i]) == guess {
+			foundInWord = true
+			break
+		}
+	}
+
+	if !foundInWord {
+		state.Attempts++
+	}
+
+	// Check win/loss
+	rendered := renderPenduWord(state)
+	if !strings.Contains(rendered, "_") {
+		state.Active = false
+		savePenduState(key, state)
+		msg := "🎉 *VICTOIRE !* Vous avez trouvé le mot : *" + state.Word + "*\n\nRécompense : *+5 points* pour tout le groupe !"
+		_ = UpdateMemberPoints(ctx.SenderJid, ctx.RemoteJid, 5)
+		_, _ = sendAndSaveBotMessage(ctx, msg, ctx.MsgId)
+		return
+	}
+
+	if state.Attempts >= 7 {
+		state.Active = false
+		savePenduState(key, state)
+		msg := "💀 *PERDU !* Le mot était : *" + state.Word + "*\nDommage, réessayez !"
+		_, _ = sendAndSaveBotMessage(ctx, msg, ctx.MsgId)
+		return
+	}
+
+	savePenduState(key, state)
+	status := fmt.Sprintf("🎮 *Pendu* (%d/7 erreurs)\n\n`%s`\n\nLettres : %s", state.Attempts, rendered, strings.Join(state.Guessed, ", "))
+	_, _ = sendAndSaveBotMessage(ctx, status, ctx.MsgId)
+}
+
+func renderPenduWord(s PenduState) string {
+	res := ""
+	for i := 0; i < len(s.Word); i++ {
+		char := string(s.Word[i])
+		found := false
+		for _, g := range s.Guessed {
+			if g == char {
+				found = true
+				break
+			}
+		}
+		if found {
+			res += char + " "
+		} else {
+			res += "_ "
+		}
+	}
+	return strings.TrimSpace(res)
+}
+
+func savePenduState(key string, s PenduState) {
+	data, _ := json.Marshal(s)
+	rdb.Set(context.Background(), key, string(data), 15*time.Minute)
+}
+
+func getPenduState(key string) (PenduState, bool) {
+	val, err := rdb.Get(context.Background(), key).Result()
+	if err != nil { return PenduState{}, false }
+	var s PenduState
+	json.Unmarshal([]byte(val), &s)
+	return s, true
+}
+
+type QuizState struct {
+	QuestionIndex int  `json:"question_index"`
+	Active        bool `json:"active"`
+}
+
+func handleQuizGame(ctx MessageContext, args string) {
+	key := fmt.Sprintf("game:quiz:%s", ctx.RemoteJid)
+	
+	if args == "" || strings.ToLower(args) == "start" {
+		idx := rand.Intn(len(QuizQuestions))
+		q := QuizQuestions[idx]
+		state := QuizState{
+			QuestionIndex: idx,
+			Active:        true,
+		}
+		saveQuizState(key, state)
+		
+		var sb strings.Builder
+		sb.WriteString("❓ *QUIZ POULGA*\n\n")
+		sb.WriteString("*" + q.Question + "*\n\n")
+		for i, opt := range q.Options {
+			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, opt))
+		}
+		sb.WriteString("\nRéponds avec le numéro du bon choix !")
+		_, _ = sendAndSaveBotMessage(ctx, sb.String(), ctx.MsgId)
+		return
+	}
+
+	state, found := getQuizState(key)
+	if !found || !state.Active {
+		_, _ = sendAndSaveBotMessage(ctx, "⚠️ Aucun Quiz en cours. Tape `.quiz start`.", ctx.MsgId)
+		return
+	}
+
+	// Process answer
+	choice, err := strconv.Atoi(strings.TrimSpace(args))
+	if err != nil {
+		_, _ = sendAndSaveBotMessage(ctx, "⚠️ Réponds avec un numéro (ex: `2`).", ctx.MsgId)
+		return
+	}
+
+	q := QuizQuestions[state.QuestionIndex]
+	if choice-1 == q.Answer {
+		state.Active = false
+		saveQuizState(key, state)
+		msg := fmt.Sprintf("🎉 *BRAVO !* C'est la bonne réponse.\n\nRécompense : *+%d points* pour @%s !", q.XP, strings.Split(ctx.SenderJid, "@")[0])
+		_ = UpdateMemberPoints(ctx.SenderJid, ctx.RemoteJid, q.XP)
+		_, _ = sendAndSaveBotMessage(ctx, msg, ctx.MsgId)
+	} else {
+		msg := "❌ *DOMMAGE !* Ce n'est pas la bonne réponse. Réessaie !"
+		_, _ = sendAndSaveBotMessage(ctx, msg, ctx.MsgId)
+	}
+}
+
+func saveQuizState(key string, s QuizState) {
+	data, _ := json.Marshal(s)
+	rdb.Set(context.Background(), key, string(data), 10*time.Minute)
+}
+
+func getQuizState(key string) (QuizState, bool) {
+	val, err := rdb.Get(context.Background(), key).Result()
+	if err != nil { return QuizState{}, false }
+	var s QuizState
+	json.Unmarshal([]byte(val), &s)
+	return s, true
 }

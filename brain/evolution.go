@@ -37,7 +37,7 @@ func evoClient() (*resty.Client, string, string) {
 func sendWhatsAppMessage(instance, remoteJid, text, quotedMsgId, participant string) (string, error) {
 	client, evoURL, _ := evoClient()
 
-	number := strings.Split(remoteJid, "@")[0]
+	number := remoteJid
 
 	body := EvolutionSendMessageRequest{
 		Number:      number,
@@ -49,7 +49,9 @@ func sendWhatsAppMessage(instance, remoteJid, text, quotedMsgId, participant str
 	if quotedMsgId != "" {
 		body.Quoted = map[string]interface{}{
 			"key": map[string]interface{}{
-				"id": quotedMsgId,
+				"id":        quotedMsgId,
+				"fromMe":    false,
+				"remoteJid": remoteJid,
 			},
 		}
 	}
@@ -76,11 +78,10 @@ func sendWhatsAppMessage(instance, remoteJid, text, quotedMsgId, participant str
 	return result.Key.Id, nil
 }
 
-// sendWhatsAppMessageWithMentions sends a message with multiple mentions
 func sendWhatsAppMessageWithMentions(instance, remoteJid, text string, mentions []string) (string, error) {
 	client, evoURL, _ := evoClient()
 
-	number := strings.Split(remoteJid, "@")[0]
+	number := remoteJid
 
 	body := EvolutionSendMessageRequest{
 		Number:    number,
@@ -109,8 +110,7 @@ func sendWhatsAppMessageWithMentions(instance, remoteJid, text string, mentions 
 
 func sendWhatsAppMedia(instance, remoteJid, mediaBase64, fileName, caption, mediaType string) (string, error) {
 	client, evoURL, _ := evoClient()
-
-	number := strings.Split(remoteJid, "@")[0]
+	number := remoteJid
 
 	var result EvolutionResponse
 	resp, err := client.R().
@@ -134,11 +134,9 @@ func sendWhatsAppMedia(instance, remoteJid, mediaBase64, fileName, caption, medi
 	return result.Key.Id, nil
 }
 
-// sendWhatsAppAudio sends a voice message
 func sendWhatsAppAudio(instance, remoteJid string, audioBase64 string) (string, error) {
 	client, evoURL, _ := evoClient()
-
-	number := strings.Split(remoteJid, "@")[0]
+	number := remoteJid
 
 	var result EvolutionResponse
 	resp, err := client.R().
@@ -163,16 +161,13 @@ func sendWhatsAppAudio(instance, remoteJid string, audioBase64 string) (string, 
 // STICKER PIPELINE
 // ============================================================================
 
-// getMediaBase64 fetches base64 data from a media message via Evolution API
 func getMediaBase64(instance, msgId string) (string, error) {
 	client, evoURL, _ := evoClient()
 	client.SetTimeout(30 * time.Second)
 
 	payloadData := map[string]interface{}{
 		"message": map[string]interface{}{
-			"key": map[string]interface{}{
-				"id": msgId,
-			},
+			"key": map[string]interface{}{"id": msgId},
 		},
 		"convertToMp4": false,
 	}
@@ -182,38 +177,24 @@ func getMediaBase64(instance, msgId string) (string, error) {
 		Post(fmt.Sprintf("%s/chat/getBase64FromMediaMessage/%s", evoURL, instance))
 
 	if err != nil {
-		fmt.Printf("[MEDIA] getBase64 request error: %v\n", err)
 		return "", err
 	}
-
 	if resp.IsError() {
-		fmt.Printf("[MEDIA] getBase64 API error: %s\n", resp.String())
-		return "", fmt.Errorf("evolution media fetch error: %s", resp.String())
+		return "", fmt.Errorf("fetch error: %s", resp.String())
 	}
 
 	var result map[string]interface{}
-	if err := json.Unmarshal(resp.Body(), &result); err != nil {
-		return "", err
-	}
-
-	base64Data, ok := result["base64"].(string)
-	if !ok || base64Data == "" {
-		return "", fmt.Errorf("base64 not found in response")
-	}
-
-	// Clean data URI prefix if present
+	json.Unmarshal(resp.Body(), &result)
+	base64Data, _ := result["base64"].(string)
 	if idx := strings.Index(base64Data, ","); idx != -1 {
 		base64Data = base64Data[idx+1:]
 	}
-
 	return base64Data, nil
 }
 
-// sendSticker sends a sticker via Evolution API
 func sendSticker(instance, remoteJid, stickerBase64 string) error {
 	client, evoURL, _ := evoClient()
-
-	number := strings.Split(remoteJid, "@")[0]
+	number := remoteJid
 
 	body := map[string]interface{}{
 		"number":  number,
@@ -224,14 +205,8 @@ func sendSticker(instance, remoteJid, stickerBase64 string) error {
 		SetBody(body).
 		Post(fmt.Sprintf("%s/message/sendSticker/%s", evoURL, instance))
 
-	if err != nil {
-		fmt.Printf("[STICKER] send error: %v\n", err)
-		return err
-	}
-	if resp.IsError() {
-		fmt.Printf("[STICKER] send API error: %s\n", resp.String())
-		return fmt.Errorf("evolution sticker error: %s", resp.String())
-	}
+	if err != nil { return err }
+	if resp.IsError() { return fmt.Errorf("error: %s", resp.String()) }
 	return nil
 }
 
@@ -242,6 +217,7 @@ func sendSticker(instance, remoteJid, stickerBase64 string) error {
 func getGroupMetadata(instance, groupJid string) ([]string, error) {
 	client, evoURL, _ := evoClient()
 
+	// Robust parsing for Evolution v2
 	resp, err := client.R().
 		SetQueryParam("groupJid", groupJid).
 		Get(fmt.Sprintf("%s/group/findGroupInfos/%s", evoURL, instance))
@@ -253,11 +229,28 @@ func getGroupMetadata(instance, groupJid string) ([]string, error) {
 		return nil, fmt.Errorf("evolution group error: %s", resp.String())
 	}
 
+	// Structure flexible for Evolution v2 (handles both lowercase and capital cases)
 	var groupInfo struct {
 		Participants []struct {
-			Id    string `json:"id"`
-			Admin string `json:"admin"`
+			Id          string `json:"id"`
+			JID         string `json:"JID"`
+			PhoneNumber string `json:"PhoneNumber"`
 		} `json:"participants"`
+		Data struct {
+			Participants []struct {
+				Id          string `json:"id"`
+				JID         string `json:"JID"`
+				PhoneNumber string `json:"PhoneNumber"`
+			} `json:"Participants"`
+		} `json:"data"`
+	}
+
+	// DEBUG: Log raw response for diagnosing .tagall issues
+	rawBody := string(resp.Body())
+	if len(rawBody) < 3000 {
+		fmt.Printf("[DEBUG] GROUP_METADATA raw: %s\n", rawBody)
+	} else {
+		fmt.Printf("[DEBUG] GROUP_METADATA raw (truncated): %s...\n", rawBody[:3000])
 	}
 
 	if err := json.Unmarshal(resp.Body(), &groupInfo); err != nil {
@@ -265,36 +258,61 @@ func getGroupMetadata(instance, groupJid string) ([]string, error) {
 	}
 
 	var participants []string
-	for _, p := range groupInfo.Participants {
-		participants = append(participants, p.Id)
+	
+	// Check both potential locations for participants
+	source := groupInfo.Participants
+	if len(groupInfo.Data.Participants) > 0 {
+		source = groupInfo.Data.Participants
 	}
+
+	for _, p := range source {
+		jid := p.JID
+		if jid == "" { jid = p.Id }
+		if jid == "" { jid = p.PhoneNumber }
+		
+		if jid != "" {
+			if !strings.Contains(jid, "@") {
+				jid += "@s.whatsapp.net"
+			}
+			participants = append(participants, jid)
+		}
+	}
+	
 	return participants, nil
 }
 
 func isUserAdmin(instance, groupJid, userJid string) (bool, error) {
 	client, evoURL, _ := evoClient()
-
 	resp, err := client.R().
 		SetQueryParam("groupJid", groupJid).
 		Get(fmt.Sprintf("%s/group/findGroupInfos/%s", evoURL, instance))
 
-	if err != nil {
-		return false, err
-	}
+	if err != nil { return false, err }
 
 	var groupInfo struct {
 		Participants []struct {
 			Id    string `json:"id"`
+			JID   string `json:"JID"`
 			Admin string `json:"admin"`
 		} `json:"participants"`
+		Data struct {
+			Participants []struct {
+				Id    string `json:"id"`
+				JID   string `json:"JID"`
+				Admin string `json:"admin"`
+			} `json:"Participants"`
+		} `json:"data"`
 	}
 
-	if err := json.Unmarshal(resp.Body(), &groupInfo); err != nil {
-		return false, err
-	}
+	json.Unmarshal(resp.Body(), &groupInfo)
+	
+	source := groupInfo.Participants
+	if len(groupInfo.Data.Participants) > 0 { source = groupInfo.Data.Participants }
 
-	for _, p := range groupInfo.Participants {
-		if p.Id == userJid {
+	for _, p := range source {
+		jid := p.JID
+		if jid == "" { jid = p.Id }
+		if jid == userJid || strings.Split(jid, "@")[0] == strings.Split(userJid, "@")[0] {
 			return p.Admin != "", nil
 		}
 	}
@@ -303,20 +321,17 @@ func isUserAdmin(instance, groupJid, userJid string) (bool, error) {
 
 func kickUser(instance, groupJid, userJid string) error {
 	client, evoURL, _ := evoClient()
-
 	_, err := client.R().
 		SetBody(map[string]interface{}{
 			"groupJid":     groupJid,
 			"participants": []string{userJid},
 		}).
 		Post(fmt.Sprintf("%s/group/updateParticipant/%s?action=remove", evoURL, instance))
-
 	return err
 }
 
 func promoteUser(instance, groupJid, userJid string) error {
 	client, evoURL, _ := evoClient()
-
 	_, err := client.R().
 		SetBody(map[string]interface{}{
 			"groupJid":     groupJid,
@@ -328,7 +343,6 @@ func promoteUser(instance, groupJid, userJid string) error {
 
 func demoteUser(instance, groupJid, userJid string) error {
 	client, evoURL, _ := evoClient()
-
 	_, err := client.R().
 		SetBody(map[string]interface{}{
 			"groupJid":     groupJid,
@@ -340,21 +354,15 @@ func demoteUser(instance, groupJid, userJid string) error {
 
 func setGroupAnnouncement(instance, groupJid string, close bool) error {
 	client, evoURL, _ := evoClient()
-
 	action := "not_announcement"
-	if close {
-		action = "announcement"
-	}
-
+	if close { action = "announcement" }
 	_, err := client.R().
 		Post(fmt.Sprintf("%s/group/updateSetting/%s?groupJid=%s&action=%s", evoURL, instance, groupJid, action))
-
 	return err
 }
 
 func deleteMessage(instance, remoteJid, msgId string) error {
 	client, evoURL, _ := evoClient()
-
 	_, err := client.R().
 		SetBody(map[string]interface{}{
 			"key": map[string]interface{}{
@@ -364,64 +372,39 @@ func deleteMessage(instance, remoteJid, msgId string) error {
 			},
 		}).
 		Post(fmt.Sprintf("%s/message/delete/%s", evoURL, instance))
-
 	return err
 }
 
 func getGroupInviteLink(instance, groupJid string) (string, error) {
 	client, evoURL, _ := evoClient()
-
 	resp, err := client.R().
 		SetQueryParam("groupJid", groupJid).
 		Get(fmt.Sprintf("%s/group/inviteCode/%s", evoURL, instance))
-
-	if err != nil {
-		return "", err
-	}
-
+	if err != nil { return "", err }
 	var result map[string]interface{}
-	if err := json.Unmarshal(resp.Body(), &result); err != nil {
-		return "", err
+	json.Unmarshal(resp.Body(), &result)
+	if code, ok := result["inviteCode"].(string); ok { return "https://chat.whatsapp.com/" + code, nil }
+	if data, ok := result["data"].(map[string]interface{}); ok {
+		if code, ok := data["inviteCode"].(string); ok { return "https://chat.whatsapp.com/" + code, nil }
 	}
-
-	if code, ok := result["inviteCode"].(string); ok {
-		return "https://chat.whatsapp.com/" + code, nil
-	}
-	if code, ok := result["invite"].(string); ok {
-		return "https://chat.whatsapp.com/" + code, nil
-	}
-
 	return "", fmt.Errorf("invite code not found")
 }
 
-// ============================================================================
-// PRESENCE / TYPING
-// ============================================================================
-
 func sendTypingStatus(instance, remoteJid string) error {
 	client, evoURL, _ := evoClient()
-
-	number := strings.Split(remoteJid, "@")[0]
-
+	number := remoteJid
 	_, err := client.R().
 		SetBody(EvolutionPresenceRequest{
 			Number:   number,
 			Presence: "composing",
 		}).
 		Post(fmt.Sprintf("%s/chat/presenceUpdate/%s", evoURL, instance))
-
 	return err
 }
 
-// ============================================================================
-// TTS (optional)
-// ============================================================================
-
 func generateTTS(text string) (string, error) {
 	ttsURL := "http://kokoro-tts:8887/v1/audio/speech"
-
-	client := resty.New()
-	client.SetTimeout(15 * time.Second)
+	client := resty.New().SetTimeout(15 * time.Second)
 	resp, err := client.R().
 		SetBody(TTSRequest{
 			Model: "kokoro",
@@ -430,12 +413,7 @@ func generateTTS(text string) (string, error) {
 		}).
 		Post(ttsURL)
 
-	if err != nil {
-		return "", err
-	}
-	if resp.IsError() {
-		return "", fmt.Errorf("tts error: %s", resp.String())
-	}
-
+	if err != nil { return "", err }
+	if resp.IsError() { return "", fmt.Errorf("tts error: %s", resp.String()) }
 	return base64.StdEncoding.EncodeToString(resp.Body()), nil
 }

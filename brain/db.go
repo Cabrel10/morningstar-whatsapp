@@ -132,6 +132,17 @@ func runMigrations() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_rules_group ON group_rules(group_jid)`,
 
+		// Member Details (for Stats & Activity)
+		`CREATE TABLE IF NOT EXISTS member_details (
+			jid TEXT NOT NULL,
+			group_jid TEXT NOT NULL,
+			push_name TEXT DEFAULT '',
+			message_count INTEGER DEFAULT 0,
+			last_seen TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+			PRIMARY KEY (jid, group_jid)
+		)`,
+
 		// Member Profiles (Custom Names)
 		`CREATE TABLE IF NOT EXISTS member_profiles (
 			jid TEXT NOT NULL,
@@ -206,6 +217,57 @@ func runMigrations() error {
 			changed_by TEXT,
 			changed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 		)`,
+
+		// Member Interactions (Social Graph)
+		`CREATE TABLE IF NOT EXISTS member_interactions (
+			group_jid TEXT NOT NULL,
+			source_jid TEXT NOT NULL,
+			target_jid TEXT NOT NULL,
+			interaction_type TEXT NOT NULL,
+			weight INTEGER DEFAULT 1,
+			last_interaction TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+			PRIMARY KEY (group_jid, source_jid, target_jid, interaction_type)
+		)`,
+
+		// Sticker Usage
+		`CREATE TABLE IF NOT EXISTS member_sticker_usage (
+			jid TEXT NOT NULL,
+			sticker_file_sha256 TEXT NOT NULL,
+			usage_count INTEGER DEFAULT 1,
+			last_used TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+			PRIMARY KEY (jid, sticker_file_sha256)
+		)`,
+
+		// User Warnings
+		`CREATE TABLE IF NOT EXISTS user_warnings (
+			jid TEXT NOT NULL,
+			group_jid TEXT NOT NULL,
+			warning_count INTEGER DEFAULT 0,
+			last_warning TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+			PRIMARY KEY (jid, group_jid)
+		)`,
+
+		// Group Settings
+		`CREATE TABLE IF NOT EXISTS group_settings (
+			group_jid TEXT PRIMARY KEY,
+			welcome_enabled BOOLEAN DEFAULT true,
+			antilink_enabled BOOLEAN DEFAULT false,
+			antispam_enabled BOOLEAN DEFAULT false,
+			antisuppression_enabled BOOLEAN DEFAULT false,
+			is_closed BOOLEAN DEFAULT false,
+			updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+		)`,
+
+		// Bot Suggestions / Improvements
+		`CREATE TABLE IF NOT EXISTS bot_suggestions (
+			id SERIAL PRIMARY KEY,
+			group_jid TEXT NOT NULL,
+			suggestion TEXT NOT NULL,
+			reason TEXT,
+			status TEXT DEFAULT 'pending', -- pending, accepted, rejected
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_suggestions_group ON bot_suggestions(group_jid)`,
 	}
 
 	for _, sql := range migrations {
@@ -507,12 +569,53 @@ func upsertMember(jid, groupJid, pushName string) error {
 	return err
 }
 
-func getMemberProfiles(groupJid string) (string, error) {
+type GroupMember struct {
+	Jid          string
+	PushName     string
+	MessageCount int
+	CreatedAt    time.Time
+	LastSeen     time.Time
+}
+
+func GetMemberDetails(jid, groupJid string) (GroupMember, error) {
+	var m GroupMember
+	err := db.QueryRow(context.Background(),
+		`SELECT jid, push_name, message_count, created_at, last_seen
+		 FROM member_details
+		 WHERE jid = $1 AND group_jid = $2`,
+		jid, groupJid).Scan(&m.Jid, &m.PushName, &m.MessageCount, &m.CreatedAt, &m.LastSeen)
+	return m, err
+}
+
+func GetGroupMembersDetailed(groupJid string) ([]GroupMember, error) {
 	rows, err := db.Query(context.Background(),
-		`SELECT push_name, skills, interests, message_count
+		`SELECT jid, push_name, message_count, created_at, last_seen
 		 FROM member_details
 		 WHERE group_jid = $1
-		 ORDER BY message_count DESC LIMIT 15`,
+		 ORDER BY message_count DESC`,
+		groupJid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var members []GroupMember
+	for rows.Next() {
+		var m GroupMember
+		if err := rows.Scan(&m.Jid, &m.PushName, &m.MessageCount, &m.CreatedAt, &m.LastSeen); err != nil {
+			continue
+		}
+		members = append(members, m)
+	}
+	return members, nil
+}
+
+func getMemberProfiles(groupJid string) (string, error) {
+	rows, err := db.Query(context.Background(),
+		`SELECT jid, push_name, message_count, created_at
+		 FROM member_details
+		 WHERE group_jid = $1
+		 ORDER BY message_count DESC LIMIT 20`,
 		groupJid)
 	if err != nil {
 		return "", err
@@ -520,22 +623,23 @@ func getMemberProfiles(groupJid string) (string, error) {
 	defer rows.Close()
 
 	var profiles []string
+	now := time.Now()
 	for rows.Next() {
-		var name string
-		var skills, interests *string
+		var jid, pushName string
 		var count int
-		if err := rows.Scan(&name, &skills, &interests, &count); err != nil {
+		var createdAt time.Time
+		if err := rows.Scan(&jid, &pushName, &count, &createdAt); err != nil {
 			continue
 		}
-		s := "?"
-		i := "?"
-		if skills != nil {
-			s = *skills
-		}
-		if interests != nil {
-			i = *interests
-		}
-		profiles = append(profiles, fmt.Sprintf("- %s (%d msgs) | Skills: %s | Interets: %s", name, count, s, i))
+		
+		seniority := "Nouveau"
+		days := now.Sub(createdAt).Hours() / 24
+		if days > 30 { seniority = "Vétéran" } else if days > 7 { seniority = "Habitué" }
+		
+		name := pushName
+		if name == "" { name = strings.Split(jid, "@")[0] }
+		
+		profiles = append(profiles, fmt.Sprintf("- %s (@%s) : %d msgs | %s", name, strings.Split(jid, "@")[0], count, seniority))
 	}
 	return strings.Join(profiles, "\n"), nil
 }
@@ -649,10 +753,18 @@ func GetMemberName(jid, groupJid, fallbackName string) string {
 		WHERE jid = $1 AND group_jid = $2
 	`, jid, groupJid).Scan(&customName)
 
-	if err != nil || customName == "" {
+	if err == nil && customName != "" {
+		return customName
+	}
+
+	// If no custom name, use fallback (PushName)
+	if fallbackName != "" {
 		return fallbackName
 	}
-	return customName
+
+	// Final fallback: return number without @... suffix
+	parts := strings.Split(jid, "@")
+	return parts[0]
 }
 
 // ============================================================================
