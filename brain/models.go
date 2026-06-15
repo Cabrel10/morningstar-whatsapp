@@ -20,6 +20,12 @@ type MessageData struct {
 	Message     json.RawMessage `json:"message"`
 	PushName    string          `json:"pushName"`
 	ContextInfo *ContextInfo    `json:"contextInfo,omitempty"` // Evolution v2.x place ceci ici !
+	
+	// Evolution v2.3.7 sometimes flattens context info to the data level
+	StanzaId      string   `json:"stanzaId,omitempty"`
+	Participant   string   `json:"participant,omitempty"`
+	MentionedJid  []string `json:"mentionedJid,omitempty"`
+	QuotedMessage any      `json:"quotedMessage,omitempty"`
 }
 
 type MessageKey struct {

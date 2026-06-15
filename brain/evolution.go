@@ -245,15 +245,9 @@ func getGroupMetadata(instance, groupJid string) ([]string, error) {
 		} `json:"data"`
 	}
 
-	// DEBUG: Log raw response for diagnosing .tagall issues
-	rawBody := string(resp.Body())
-	if len(rawBody) < 3000 {
-		fmt.Printf("[DEBUG] GROUP_METADATA raw: %s\n", rawBody)
-	} else {
-		fmt.Printf("[DEBUG] GROUP_METADATA raw (truncated): %s...\n", rawBody[:3000])
-	}
-
+	// DEBUG: Log summary for .tagall issues
 	if err := json.Unmarshal(resp.Body(), &groupInfo); err != nil {
+		fmt.Printf("[DEBUG] GROUP_METADATA unmarshal error: %v | raw: %s\n", err, string(resp.Body()))
 		return nil, err
 	}
 
@@ -263,6 +257,39 @@ func getGroupMetadata(instance, groupJid string) ([]string, error) {
 	source := groupInfo.Participants
 	if len(groupInfo.Data.Participants) > 0 {
 		source = groupInfo.Data.Participants
+	}
+
+	fmt.Printf("[DEBUG] GROUP_METADATA found %d participants\n", len(source))
+	if len(source) <= 1 {
+		// Only log raw if we found almost nothing, to help diagnose the ".tagall only tags admin" bug
+		fmt.Printf("[DEBUG] GROUP_METADATA raw (potential bug): %s\n", string(resp.Body()))
+		
+		// FALLBACK: Try listParticipants endpoint which is sometimes more reliable in v2
+		fmt.Printf("[DEBUG] GROUP_METADATA: Trying listParticipants fallback...\n")
+		respLP, errLP := client.R().
+			SetQueryParam("groupJid", groupJid).
+			Get(fmt.Sprintf("%s/group/listParticipants/%s", evoURL, instance))
+		
+		if errLP == nil && !respLP.IsError() {
+			var lpData struct {
+				Data []struct {
+					Id string `json:"id"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(respLP.Body(), &lpData); err == nil && len(lpData.Data) > 0 {
+				fmt.Printf("[DEBUG] GROUP_METADATA: listParticipants found %d members\n", len(lpData.Data))
+				for _, p := range lpData.Data {
+					jid := p.Id
+					if jid != "" {
+						if !strings.Contains(jid, "@") {
+							jid += "@s.whatsapp.net"
+						}
+						participants = append(participants, jid)
+					}
+				}
+				return participants, nil
+			}
+		}
 	}
 
 	for _, p := range source {

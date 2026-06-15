@@ -297,6 +297,17 @@ func handleWebhook(c echo.Context) error {
 		fmt.Printf("[DEBUG] CTX_SOURCE: data.contextInfo (Evolution v2.x)\n")
 	}
 
+	// FALLBACK 1.5: Evolution v2.3.7 flattened fields
+	if ctxInfo == nil && data.StanzaId != "" {
+		ctxInfo = &ContextInfo{
+			StanzaId:      data.StanzaId,
+			Participant:   data.Participant,
+			MentionedJid:  data.MentionedJid,
+			QuotedMessage: data.QuotedMessage,
+		}
+		fmt.Printf("[DEBUG] CTX_SOURCE: flattened data fields (Evolution v2.3.7)\n")
+	}
+
 	// FALLBACK 2: If no contextInfo found in struct but raw JSON has it
 	if ctxInfo == nil && hasCtxInRaw {
 		ctxInfo = extractContextInfoFromRaw(data.Message)

@@ -24,13 +24,13 @@ func ChatWithOllama(messages []api.Message, intent Intent, tools []api.Tool) (*a
 	}
 	u, _ := url.Parse(ollamaURL)
 
-	// Use a client with a 120s timeout to prevent worker starvation
-	httpClient := &http.Client{Timeout: 120 * time.Second}
+	// Use a client with a 240s timeout to prevent worker starvation
+	httpClient := &http.Client{Timeout: 240 * time.Second}
 	client := api.NewClient(u, httpClient)
 
 	model := os.Getenv("OLLAMA_MODEL")
 	if model == "" {
-		model = "gemma3:4b"
+		model = "qwen2.5:0.5b"
 	}
 
 	options := getOllamaOptions(intent)
@@ -45,8 +45,8 @@ func ChatWithOllama(messages []api.Message, intent Intent, tools []api.Tool) (*a
 
 	fmt.Printf("[OLLAMA-NATIVE] Calling %s (intent=%s, messages=%d, tools=%d)\n", model, intent, len(messages), len(tools))
 
-	// Context timeout: never block the worker goroutine more than 120s
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	// Context timeout: never block the worker goroutine more than 240s
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 	defer cancel()
 
 	var finalMsg *api.Message
