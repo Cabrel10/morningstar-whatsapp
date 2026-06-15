@@ -234,13 +234,13 @@ func getGroupMetadata(instance, groupJid string) ([]string, error) {
 		Participants []struct {
 			Id          string `json:"id"`
 			JID         string `json:"JID"`
-			PhoneNumber string `json:"PhoneNumber"`
+			PhoneNumber string `json:"phoneNumber"`
 		} `json:"participants"`
 		Data struct {
 			Participants []struct {
 				Id          string `json:"id"`
 				JID         string `json:"JID"`
-				PhoneNumber string `json:"PhoneNumber"`
+				PhoneNumber string `json:"phoneNumber"`
 			} `json:"Participants"`
 		} `json:"data"`
 	}
@@ -293,9 +293,9 @@ func getGroupMetadata(instance, groupJid string) ([]string, error) {
 	}
 
 	for _, p := range source {
-		jid := p.JID
+		jid := p.PhoneNumber
 		if jid == "" { jid = p.Id }
-		if jid == "" { jid = p.PhoneNumber }
+		if jid == "" { jid = p.JID }
 		
 		if jid != "" {
 			if !strings.Contains(jid, "@") {
@@ -318,13 +318,15 @@ func isUserAdmin(instance, groupJid, userJid string) (bool, error) {
 
 	var groupInfo struct {
 		Participants []struct {
-			Id    string `json:"id"`
+			Id          string `json:"id"`
+			PhoneNumber string `json:"phoneNumber"`
 			JID   string `json:"JID"`
 			Admin string `json:"admin"`
 		} `json:"participants"`
 		Data struct {
 			Participants []struct {
-				Id    string `json:"id"`
+				Id          string `json:"id"`
+				PhoneNumber string `json:"phoneNumber"`
 				JID   string `json:"JID"`
 				Admin string `json:"admin"`
 			} `json:"Participants"`
@@ -337,7 +339,7 @@ func isUserAdmin(instance, groupJid, userJid string) (bool, error) {
 	if len(groupInfo.Data.Participants) > 0 { source = groupInfo.Data.Participants }
 
 	for _, p := range source {
-		jid := p.JID
+		jid := p.PhoneNumber
 		if jid == "" { jid = p.Id }
 		if jid == userJid || strings.Split(jid, "@")[0] == strings.Split(userJid, "@")[0] {
 			return p.Admin != "", nil

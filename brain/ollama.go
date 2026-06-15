@@ -16,7 +16,8 @@ var (
 	semaphore = make(chan struct{}, 3) // Max 3 concurrent LLM requests
 )
 
-// ChatWithOllama calls the Ollama API with structured messages and tools
+// ChatWithOllama calls the Ollama API with structured messages and tools.
+// If the model doesn't support tools (400 error), it automatically retries without tools.
 func ChatWithOllama(messages []api.Message, intent Intent, tools []api.Tool) (*api.Message, error) {
 	ollamaURL := os.Getenv("OLLAMA_URL")
 	if ollamaURL == "" {
@@ -30,7 +31,7 @@ func ChatWithOllama(messages []api.Message, intent Intent, tools []api.Tool) (*a
 
 	model := os.Getenv("OLLAMA_MODEL")
 	if model == "" {
-		model = "qwen2.5:0.5b"
+		model = "qwen2.5:1.5b"
 	}
 
 	options := getOllamaOptions(intent)
@@ -56,17 +57,42 @@ func ChatWithOllama(messages []api.Message, intent Intent, tools []api.Tool) (*a
 	})
 
 	if err != nil {
+		errStr := err.Error()
+		// FALLBACK: If model doesn't support tools, retry without tools
+		if len(tools) > 0 && (strings.Contains(errStr, "does not support tools") ||
+			strings.Contains(errStr, "400")) {
+			fmt.Printf("[OLLAMA-NATIVE] Model %s doesn't support tools, retrying without tools...\n", model)
+
+			req.Tools = nil
+			ctx2, cancel2 := context.WithTimeout(context.Background(), 240*time.Second)
+			defer cancel2()
+
+			err2 := client.Chat(ctx2, req, func(resp api.ChatResponse) error {
+				finalMsg = &resp.Message
+				return nil
+			})
+			if err2 != nil {
+				fmt.Printf("[OLLAMA-NATIVE] Retry without tools also failed: %v\n", err2)
+				return nil, err2
+			}
+			fmt.Printf("[OLLAMA-NATIVE] Success without tools (response=%d chars)\n", len(finalMsg.Content))
+			return finalMsg, nil
+		}
+
 		fmt.Printf("[OLLAMA-NATIVE] Error: %v\n", err)
 		return nil, err
 	}
 
+	if finalMsg != nil {
+		fmt.Printf("[OLLAMA-NATIVE] Success (response=%d chars, toolCalls=%d)\n", len(finalMsg.Content), len(finalMsg.ToolCalls))
+	}
 	return finalMsg, nil
 }
 
 func getOllamaOptions(intent Intent) map[string]interface{} {
 	base := map[string]interface{}{
 		"num_thread":     3,
-		"num_ctx":        8192,
+		"num_ctx":        4096,
 		"temperature":    0.4,
 		"num_predict":    512,
 		"top_p":          0.9,
@@ -105,6 +131,7 @@ func cleanResponse(text string) string {
 	if text == "" {
 		return "..."
 	}
+
 	unwantedPrefixes := []string{
 		"Bonjour ! Je suis Poulga",
 		"Je suis Poulga,",
@@ -115,5 +142,6 @@ func cleanResponse(text string) string {
 			text = strings.TrimSpace(text[len(prefix):])
 		}
 	}
+
 	return text
 }

@@ -614,7 +614,7 @@ func processLLMResponse(ctx MessageContext) {
 	userMem, _ := GetUserMemory(ctx.SenderJid, ctx.RemoteJid)
 	groupFacts, _ := GetGroupFacts(ctx.RemoteJid)
 	summary, _ := GetLatestSummary(ctx.RemoteJid)
-	customPersona := GetGroupPersona(ctx.RemoteJid)
+	humeur := GetGroupHumeur(ctx.RemoteJid)
 
 	var factsLegacy []string
 	for _, f := range groupFacts {
@@ -625,7 +625,7 @@ func processLLMResponse(ctx MessageContext) {
 	// STEP 2: BUILD STRUCTURED MESSAGES
 	// ======================================================================
 	// Note: We use BuildChatPrompt for the BASE instruction, but we wrap it in api.Message
-	basePrompt := BuildChatPrompt(ctx, history, userMem, nil, factsLegacy, summary, customPersona)
+	basePrompt := BuildChatPromptWithHumeur(ctx, history, userMem, nil, factsLegacy, summary, "", humeur)
 	
 	messages := []api.Message{
 		{Role: "system", Content: basePrompt},

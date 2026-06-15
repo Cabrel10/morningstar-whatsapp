@@ -361,6 +361,60 @@ func handleCommand(ctx MessageContext, cmd, args string) {
 			response = fmt.Sprintf("🌐 Langue changée en *%s*.", lang)
 		}
 
+	case "humeur", "ambiance", "mode":
+		if args == "" {
+			activeHumeur := GetGroupHumeur(remoteJid)
+			style := ResponseStyle{
+				Title:      "Humeur de Poulga",
+				TitleEmoji: "🎭",
+				Sections: []Section{
+					{Content: fmt.Sprintf("L'humeur active dans ce groupe est : *%s*.", strings.ToUpper(activeHumeur))},
+					{
+						Title:      "Changer d'humeur",
+						TitleEmoji: "💡",
+						Items: []string{
+							"`.humeur amical` — Chaleureuse et tout public 👥",
+							"`.humeur glamour` — Charismatique, charmeuse et élégante ✨",
+							"`.humeur hot` — Impertinente, piquante et sans filtre 🔥",
+							"`.humeur dev` — Technique, sérieuse et axée code 💻",
+						},
+					},
+				},
+			}
+			response = RenderWhatsApp(style)
+			break
+		}
+		choix := strings.ToLower(strings.TrimSpace(args))
+		if choix != "amical" && choix != "glamour" && choix != "hot" && choix != "dev" {
+			response = "⚠️ *Humeur invalide !* Choisis parmi : `amical`, `glamour`, `hot`, `dev`."
+			break
+		}
+		err := SetGroupHumeur(remoteJid, choix)
+		if err != nil {
+			response = "❌ Impossible de modifier mon humeur."
+		} else {
+			emoji := "👥"
+			text := "Je suis désormais douce, amicale et prête à aider tout le monde !"
+			if choix == "glamour" {
+				emoji = "✨"
+				text = "Une touche de charme et d'élégance... Je suis désormais ton associée glamour."
+			} else if choix == "hot" {
+				emoji = "🔥"
+				text = "Alerte ! Je passe en mode piquant, impertinent et sans filtre. Accroche-toi !"
+			} else if choix == "dev" {
+				emoji = "💻"
+				text = "Mode ingénieur activé. Je suis prête pour les requêtes techniques et le code."
+			}
+			style := ResponseStyle{
+				Title:      "Humeur modifiée !",
+				TitleEmoji: emoji,
+				Sections: []Section{
+					{Content: text},
+				},
+			}
+			response = RenderWhatsApp(style)
+		}
+
 	case "tagall":
 		if !strings.HasSuffix(remoteJid, "@g.us") {
 			response = "❌ Cette commande ne fonctionne que dans les groupes."
