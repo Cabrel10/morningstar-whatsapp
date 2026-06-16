@@ -314,7 +314,13 @@ func isUserAdmin(instance, groupJid, userJid string) (bool, error) {
 		SetQueryParam("groupJid", groupJid).
 		Get(fmt.Sprintf("%s/group/findGroupInfos/%s", evoURL, instance))
 
-	if err != nil { return false, err }
+	if err != nil { 
+		fmt.Printf("[DEBUG] isUserAdmin ERROR: %v\n", err)
+		return false, err 
+	}
+
+	fmt.Printf("[DEBUG] isUserAdmin Response Code: %d\n", resp.StatusCode())
+	// fmt.Printf("[DEBUG] isUserAdmin Body: %s\n", string(resp.Body()))
 
 	var groupInfo struct {
 		Participants []struct {
@@ -338,25 +344,56 @@ func isUserAdmin(instance, groupJid, userJid string) (bool, error) {
 	source := groupInfo.Participants
 	if len(groupInfo.Data.Participants) > 0 { source = groupInfo.Data.Participants }
 
+	fmt.Printf("[DEBUG] isUserAdmin found %d participants. Source type: %s\n", len(source), "combined")
+	for i, p := range source {
+		fmt.Printf("[DEBUG] Participant %d: Id=%s PhoneNumber=%s JID=%s Admin=%s\n", i, p.Id, p.PhoneNumber, p.JID, p.Admin)
+	}
+
+	cleanUser := strings.Split(strings.Split(userJid, "@")[0], ":")[0]
+	fmt.Printf("[DEBUG] isUserAdmin checking userJid: %s (clean: %s)\n", userJid, cleanUser)
+
 	for _, p := range source {
-		jid := p.PhoneNumber
-		if jid == "" { jid = p.Id }
-		if jid == userJid || strings.Split(jid, "@")[0] == strings.Split(userJid, "@")[0] {
-			return p.Admin != "", nil
+		// Try to match against any identifier provided by Evolution
+		ids := []string{p.Id, p.PhoneNumber, p.JID}
+		
+		match := false
+		for _, id := range ids {
+			if id == "" { continue }
+			puser := strings.Split(strings.Split(id, "@")[0], ":")[0]
+			fmt.Printf("[DEBUG] comparing [%s] vs [%s]\n", puser, cleanUser)
+			if puser == cleanUser {
+				match = true
+				break
+			}
+		}
+
+		if match {
+			isAdmin := p.Admin != ""
+			fmt.Printf("[DEBUG] MATCH FOUND: user=%s isAdmin=%v (raw admin field: %q)\n", cleanUser, isAdmin, p.Admin)
+			return isAdmin, nil
 		}
 	}
+	fmt.Printf("[DEBUG] isUserAdmin: user %s NOT found in %d participants\n", cleanUser, len(source))
 	return false, nil
 }
 
 func kickUser(instance, groupJid, userJid string) error {
+	fmt.Printf("[DEBUG] kickUser: instance=%s group=%s target=%s\n", instance, groupJid, userJid)
 	client, evoURL, _ := evoClient()
-	_, err := client.R().
+	resp, err := client.R().
 		SetBody(map[string]interface{}{
 			"groupJid":     groupJid,
+			"action":       "remove",
 			"participants": []string{userJid},
 		}).
-		Post(fmt.Sprintf("%s/group/updateParticipant/%s?action=remove", evoURL, instance))
-	return err
+		Post(fmt.Sprintf("%s/group/updateParticipant/%s", evoURL, instance))
+	
+	if err != nil {
+		fmt.Printf("[DEBUG] kickUser ERROR: %v\n", err)
+		return err
+	}
+	fmt.Printf("[DEBUG] kickUser Response: %d | %s\n", resp.StatusCode(), resp.String())
+	return nil
 }
 
 func promoteUser(instance, groupJid, userJid string) error {
@@ -364,9 +401,10 @@ func promoteUser(instance, groupJid, userJid string) error {
 	_, err := client.R().
 		SetBody(map[string]interface{}{
 			"groupJid":     groupJid,
+			"action":       "promote",
 			"participants": []string{userJid},
 		}).
-		Post(fmt.Sprintf("%s/group/updateParticipant/%s?action=promote", evoURL, instance))
+		Post(fmt.Sprintf("%s/group/updateParticipant/%s", evoURL, instance))
 	return err
 }
 
@@ -375,9 +413,10 @@ func demoteUser(instance, groupJid, userJid string) error {
 	_, err := client.R().
 		SetBody(map[string]interface{}{
 			"groupJid":     groupJid,
+			"action":       "demote",
 			"participants": []string{userJid},
 		}).
-		Post(fmt.Sprintf("%s/group/updateParticipant/%s?action=demote", evoURL, instance))
+		Post(fmt.Sprintf("%s/group/updateParticipant/%s", evoURL, instance))
 	return err
 }
 

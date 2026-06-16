@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -214,7 +215,18 @@ func handleCommand(ctx MessageContext, cmd, args string) {
 		}
 
 		rolesStr := "Membre standard"
-		if len(roles) > 0 { rolesStr = strings.Join(roles, ", ") }
+		isWAAdmin, _ := isUserAdmin(instance, remoteJid, targetJid)
+		if isWAAdmin {
+			rolesStr = "👑 Administrateur"
+		}
+		if len(roles) > 0 {
+			customRoles := strings.Join(roles, ", ")
+			if isWAAdmin {
+				rolesStr = "👑 Administrateur, " + customRoles
+			} else {
+				rolesStr = customRoles
+			}
+		}
 		
 		style := ResponseStyle{
 			Title:      "PROFIL DE " + strings.ToUpper(name),
@@ -394,16 +406,16 @@ func handleCommand(ctx MessageContext, cmd, args string) {
 			response = "❌ Impossible de modifier mon humeur."
 		} else {
 			emoji := "👥"
-			text := "Je suis désormais douce, amicale et prête à aider tout le monde !"
+			text := "Mode amical activé. Mais ne vous y trompez pas — je reste Poulga. 😏"
 			if choix == "glamour" {
 				emoji = "✨"
-				text = "Une touche de charme et d'élégance... Je suis désormais ton associée glamour."
+				text = "Glamour activé. Préparez vos lunettes de soleil, ça va briller. ✨"
 			} else if choix == "hot" {
 				emoji = "🔥"
-				text = "Alerte ! Je passe en mode piquant, impertinent et sans filtre. Accroche-toi !"
+				text = "Mode 🔥 activé. Âmes sensibles, c'est le moment de fuir."
 			} else if choix == "dev" {
 				emoji = "💻"
-				text = "Mode ingénieur activé. Je suis prête pour les requêtes techniques et le code."
+				text = "Mode dev. Du code propre ou rien. Vos excuses ne compilent pas. 💻"
 			}
 			style := ResponseStyle{
 				Title:      "Humeur modifiée !",
@@ -421,56 +433,76 @@ func handleCommand(ctx MessageContext, cmd, args string) {
 			break
 		}
 		
-		members, err := GetGroupMembersDetailed(remoteJid)
-		if err != nil || len(members) == 0 {
-			// BEAUTIFUL FALLBACK if DB is empty
-			participants, err := getGroupMetadata(instance, remoteJid)
-			if err != nil {
-				response = "❌ Erreur de récupération des membres."
-				break
-			}
-			var mentions []string
-			var sb strings.Builder
-			
-			msgTitle := "📢 *APPEL GÉNÉRAL*"
-			if args != "" {
-				msgTitle = "📢 *" + strings.ToUpper(args) + "*"
-			}
-			
-			sb.WriteString(msgTitle + "\n")
-			sb.WriteString("━━━━━━━━━━━━━━━\n\n")
-			sb.WriteString("✨ *LISTE DES PRÉSENTS*\n")
-			
-			for _, p := range participants {
-				sb.WriteString(fmt.Sprintf("👤 @%s\n", strings.Split(p, "@")[0]))
-				mentions = append(mentions, p)
-			}
-			
-			sb.WriteString("\n━━━━━━━━━━━━━━━\n")
-			sb.WriteString("_Poulga a réveillé tout le monde._")
-			
-			_, _ = sendWhatsAppMessageWithMentions(instance, remoteJid, sb.String(), mentions)
-			return
+		// Collect ALL members: DB members (with stats) + Evolution API (for complete coverage)
+		dbMembers, _ := GetGroupMembersDetailed(remoteJid)
+		apiParticipants, _ := getGroupMetadata(instance, remoteJid)
+		
+		// Build a unified member map: JID → {name, messageCount, days}
+		type tagMember struct {
+			Jid          string
+			DisplayName  string
+			MessageCount int
+			DaysSinceJoin float64
 		}
-
+		memberMap := make(map[string]*tagMember)
+		now := time.Now()
+		
+		// Add DB members first (they have stats)
+		for _, m := range dbMembers {
+			name := GetMemberName(m.Jid, remoteJid, m.PushName)
+			days := now.Sub(m.CreatedAt).Hours() / 24
+			memberMap[m.Jid] = &tagMember{
+				Jid:          m.Jid,
+				DisplayName:  name,
+				MessageCount: m.MessageCount,
+				DaysSinceJoin: days,
+			}
+		}
+		
+		// Add API participants who aren't in DB yet
+		for _, jid := range apiParticipants {
+			if _, exists := memberMap[jid]; !exists {
+				name := GetMemberName(jid, remoteJid, "")
+				memberMap[jid] = &tagMember{
+					Jid:          jid,
+					DisplayName:  name,
+					MessageCount: 0,
+					DaysSinceJoin: 0,
+				}
+			}
+		}
+		
+		if len(memberMap) == 0 {
+			response = "❌ Aucun membre trouvé dans ce groupe."
+			break
+		}
+		
 		var mentions []string
 		var veteranList []string
 		var activeList []string
 		var newList []string
 		
-		now := time.Now()
-		for _, m := range members {
+		for _, m := range memberMap {
 			mentions = append(mentions, m.Jid)
 			
-			days := now.Sub(m.CreatedAt).Hours() / 24
-			
-			// Display number without @s.whatsapp.net
+			// Use human name for display, but @number for WhatsApp mention rendering
 			num := strings.Split(m.Jid, "@")[0]
-			entry := fmt.Sprintf("• @%s (%d msgs)", num, m.MessageCount)
+			displayName := m.DisplayName
+			// If displayName is just the raw number, try to make it cleaner
+			if displayName == num || displayName == "" {
+				displayName = num
+			}
 			
-			if days > 30 {
+			var entry string
+			if m.MessageCount > 0 {
+				entry = fmt.Sprintf("• @%s — *%s* (%d msgs)", num, displayName, m.MessageCount)
+			} else {
+				entry = fmt.Sprintf("• @%s — *%s*", num, displayName)
+			}
+			
+			if m.DaysSinceJoin > 30 {
 				veteranList = append(veteranList, "💎 "+entry)
-			} else if days > 7 {
+			} else if m.DaysSinceJoin > 7 {
 				activeList = append(activeList, "🛡️ "+entry)
 			} else {
 				newList = append(newList, "🆕 "+entry)
@@ -505,26 +537,69 @@ func handleCommand(ctx MessageContext, cmd, args string) {
 		}
 
 		sb.WriteString("━━━━━━━━━━━━━━━\n")
-		sb.WriteString("_Design by Poulga Supreme_")
+		sb.WriteString(fmt.Sprintf("_%d membres tagués par Poulga_", len(mentions)))
 		
 		_, _ = sendWhatsAppMessageWithMentions(instance, remoteJid, sb.String(), mentions)
 		return
 
 	case "stats":
 		members, err := GetGroupMembersDetailed(remoteJid)
-		if err != nil || len(members) == 0 {
-			response = "📈 Pas encore assez de données pour ce groupe."
-			break
+		if err != nil {
+			members = []GroupMember{}
+		}
+		
+		apiParticipants, _ := getGroupMetadata(instance, remoteJid)
+		
+		// Map existing members for quick lookup
+		memberMap := make(map[string]GroupMember)
+		for _, m := range members {
+			memberMap[m.Jid] = m
+		}
+
+		// Create a complete list including non-active members
+		var completeList []GroupMember
+		for _, jid := range apiParticipants {
+			if m, exists := memberMap[jid]; exists {
+				completeList = append(completeList, m)
+			} else {
+				// Add as inactive member
+				completeList = append(completeList, GroupMember{
+					Jid: jid,
+					MessageCount: 0,
+				})
+			}
+		}
+
+		totalCount := len(apiParticipants)
+		if totalCount == 0 {
+			totalCount = len(members)
+			completeList = members
 		}
 		
 		var topList []string
 		totalMsgs := 0
-		// Sort by message count already done in DB? No, GetGroupMembersDetailed sorts by CreatedAt
-		// Let's sort manually here or use a better query
 		
-		for i, m := range members {
-			if i < 7 { // Show top 7
-				topList = append(topList, fmt.Sprintf("%d. @%s — *%d msgs*", i+1, strings.Split(m.Jid, "@")[0], m.MessageCount))
+		// Sort the complete list
+		sort.Slice(completeList, func(i, j int) bool {
+			return completeList[i].MessageCount > completeList[j].MessageCount
+		})
+
+		for i, m := range completeList {
+			if i < 15 { // Show top 15
+				name := GetMemberName(m.Jid, remoteJid, m.PushName)
+				num := strings.Split(m.Jid, "@")[0]
+				if strings.Contains(num, ":") { num = strings.Split(num, ":")[0] }
+				
+				display := name
+				if display == "" || display == num {
+					display = num
+				}
+				
+				if m.MessageCount > 0 {
+					topList = append(topList, fmt.Sprintf("%d. @%s — *%d msgs*", i+1, num, m.MessageCount))
+				} else {
+					topList = append(topList, fmt.Sprintf("%d. @%s — _inactif_", i+1, num))
+				}
 			}
 			totalMsgs += m.MessageCount
 		}
@@ -533,8 +608,8 @@ func handleCommand(ctx MessageContext, cmd, args string) {
 			Title: "DASHBOARD DU GROUPE", TitleEmoji: "📊",
 			Sections: []Section{
 				{Title: "Activité Globale", TitleEmoji: "📈", Content: fmt.Sprintf("Total de messages analysés : *%d*", totalMsgs)},
-				{Title: "Top Membres", TitleEmoji: "🔥", Items: topList},
-				{Title: "Communauté", TitleEmoji: "👥", Content: fmt.Sprintf("Nombre d'identités suivies : *%d*", len(members))},
+				{Title: "Membres du Groupe", TitleEmoji: "🔥", Items: topList},
+				{Title: "Statistiques", TitleEmoji: "👥", Content: fmt.Sprintf("Membres totaux : *%d*\nMembres actifs : *%d*", totalCount, len(members))},
 			},
 		}
 		response = RenderWhatsApp(style)

@@ -705,9 +705,11 @@ func processLLMResponse(ctx MessageContext) {
 	}
 
 	// ======================================================================
-	// STEP 4: CLEAN + SEND
+	// STEP 4: CLEAN + SANITIZE JIDs + SEND
 	// ======================================================================
 	finalResponse = cleanResponse(finalResponse)
+	finalResponse, mentions := sanitizeJidsInText(finalResponse, ctx.RemoteJid)
+	
 	if finalResponse == "" || finalResponse == "..." {
 		finalResponse = "Je n'ai pas pu formuler une réponse claire. Peux-tu reformuler ?"
 	}
@@ -715,7 +717,14 @@ func processLLMResponse(ctx MessageContext) {
 	elapsed := time.Since(start)
 	fmt.Printf("[LLM] Final response ready (intent=%s, %.1fs)\n", intent, elapsed.Seconds())
 
-	botMsgId, err := sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, finalResponse, ctx.MsgId, ctx.SenderJid)
+	var botMsgId string
+	var err error
+	if len(mentions) > 0 {
+		botMsgId, err = sendWhatsAppMessageWithMentions(ctx.Instance, ctx.RemoteJid, finalResponse, mentions)
+	} else {
+		botMsgId, err = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, finalResponse, ctx.MsgId, ctx.SenderJid)
+	}
+	
 	if err == nil && botMsgId != "" {
 		go saveBotResponse(ctx, finalResponse, botMsgId)
 	}
@@ -802,6 +811,69 @@ func handleWeeklySummary(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 	return c.JSON(http.StatusOK, map[string]string{"summary": response})
+}
+
+// ============================================================================
+// JID/LID SANITIZER — Replace technical identifiers with human names
+// ============================================================================
+
+// sanitizeJidsInText replaces any residual JID/LID patterns in LLM output with human names and collects mentions
+func sanitizeJidsInText(text string, groupJid string) (string, []string) {
+	if text == "" {
+		return text, nil
+	}
+
+	mentionsMap := make(map[string]bool)
+
+	// Pattern 1: Replace "237XXXXXXXXX@s.whatsapp.net" with @number and collect mention
+	jidRegex := regexp.MustCompile(`(\d{10,20})@s\.whatsapp\.net`)
+	text = jidRegex.ReplaceAllStringFunc(text, func(match string) string {
+		mentionsMap[match] = true
+		num := strings.Split(match, "@")[0]
+		if strings.Contains(num, ":") {
+			num = strings.Split(num, ":")[0]
+		}
+		fmt.Printf("[DEBUG] sanitizeJidsInText: found JID %s -> @%s\n", match, num)
+		return "@" + num
+	})
+
+	// Pattern 2: Replace "XXXXX@lid" with @number
+	lidRegex := regexp.MustCompile(`(\d+)@lid`)
+	text = lidRegex.ReplaceAllStringFunc(text, func(match string) string {
+		mentionsMap[match] = true
+		num := strings.Split(match, "@")[0]
+		fmt.Printf("[DEBUG] sanitizeJidsInText: found LID %s -> @%s\n", match, num)
+		return "@" + num
+	})
+
+	// Pattern 3: Standalone phone numbers (12-15 digits) that are likely JIDs
+	phoneRegex := regexp.MustCompile(`(?:^|[\s(])(\d{12,15})(?:[\s),.]|$)`)
+	text = phoneRegex.ReplaceAllStringFunc(text, func(match string) string {
+		// Extract just the digits
+		digitRegex := regexp.MustCompile(`\d{12,15}`)
+		digits := digitRegex.FindString(match)
+		if digits == "" { return match }
+		
+		jid := digits + "@s.whatsapp.net"
+		mentionsMap[jid] = true
+		fmt.Printf("[DEBUG] sanitizeJidsInText: found phone %s -> @%s\n", digits, digits)
+		return strings.Replace(match, digits, "@"+digits, 1)
+	})
+
+	// Pattern 4: Replace @g.us group JID references
+	groupRegex := regexp.MustCompile(`\d+@g\.us`)
+	text = groupRegex.ReplaceAllString(text, "ce groupe")
+
+	var mentions []string
+	for jid := range mentionsMap {
+		mentions = append(mentions, jid)
+	}
+
+	if len(mentions) > 0 {
+		fmt.Printf("[DEBUG] sanitizeJidsInText: total mentions collected: %v\n", mentions)
+	}
+
+	return text, mentions
 }
 
 // ============================================================================

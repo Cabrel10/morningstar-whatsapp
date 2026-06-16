@@ -1,3 +1,36 @@
+# Opus Report - 2025-05-23
+
+## Session Summary
+
+Today's session focused on resolving critical operational bugs reported by the user: admin recognition failure, incorrect tagging behavior in LLM responses, and incomplete group statistics.
+
+## Key Fixes & Improvements
+
+### 1. Robust Admin Recognition
+*   **Multi-Device JID Support:** Fixed a bug where users with multi-device enabled (JIDs ending in `:n@s.whatsapp.net`) were not recognized as admins. The `isUserAdmin` function now strips the suffix before comparison.
+*   **Improved Comparison Logic:** The admin check now correctly handles participants list from Evolution API by cleaning both the source and target JIDs.
+*   **Bot Self-Identity:** Ensured the bot can correctly identify its own admin status, enabling it to perform administrative actions (like `.kick`) more reliably.
+
+### 2. Clickable Tagging in LLM Responses
+*   **JID Sanitization & Mention Collection:** Overhauled `sanitizeJidsInText` to not only replace raw JIDs with names but also to format them as `@number` and collect them into a `mentions` array.
+*   **Enhanced Message Delivery:** Updated the LLM response processor to use `sendWhatsAppMessageWithMentions`. This ensures that when the LLM refers to a user, the response contains a clickable tag that notifies the user on WhatsApp.
+*   **Safety Patterns:** Refined regex patterns to avoid accidental tagging of ordinary long numbers while maintaining effectiveness for JIDs and standalone phone numbers.
+
+### 3. Comprehensive Group Statistics
+*   **API Integration for Stats:** Updated the `.stats` command to fetch the full participant list from the WhatsApp group via the Evolution API.
+*   **Tracked vs. Total Members:** The dashboard now displays both "Total Members" (from WhatsApp) and "Active Members" (tracked in the database), providing a complete view of the group's size and engagement.
+*   **Manual Sorting:** Added manual sorting by message count to ensure the top members list is always accurate, even if the database query order varies.
+
+### 4. Visibility & Identity
+*   **Admin Status in Profiles:** The `.profil` command now explicitly indicates if a member (or the bot itself) is a "👑 Administrateur" of the WhatsApp group. This provides immediate verification of the bot's permission awareness.
+*   **Import Optimization:** Added the `sort` package to `handlers.go` to support reliable metrics sorting.
+
+## Deployment & Verification
+*   **Build Status:** Verified the `brain` module builds successfully with `go build`.
+*   **Logic Check:** Confirmed that the new JID cleaning logic is applied consistently across admin checks, profiling, and tagging.
+
+---
+
 # Opus Report - 2026-06-13
 
 ## Session Summary
