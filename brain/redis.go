@@ -114,6 +114,7 @@ func GetGroupLanguage(jid string) string {
 
 // GetGroupHumeur retrieves the active mood for a group (default: amical)
 func GetGroupHumeur(groupJid string) string {
+	groupJid = strings.ReplaceAll(groupJid, " ", "")
 	val, err := rdb.Get(context.Background(), "humeur:"+groupJid).Result()
 	if err != nil || val == "" {
 		return "amical"
@@ -123,5 +124,6 @@ func GetGroupHumeur(groupJid string) string {
 
 // SetGroupHumeur saves the mood for a group in Redis
 func SetGroupHumeur(groupJid, humeur string) error {
+	groupJid = strings.ReplaceAll(groupJid, " ", "")
 	return rdb.Set(context.Background(), "humeur:"+groupJid, humeur, 0).Err()
 }

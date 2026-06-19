@@ -28,3 +28,24 @@ Cette session a marqué le passage de Poulga d'un bot réactif (passif) à une v
 Le cerveau de Poulga n'est plus un simple routeur de texte, c'est un moteur d'interaction sociale. Le passage à DuckDuckGo pour la recherche et l'ajout d'une base de données complète permettent une stabilité qu'il n'avait pas auparavant.
 
 **Action recommandée :** Redéployer avec `docker compose build brain && docker compose up -d brain` pour activer les nouvelles tables et le contenu enrichi.
+
+---
+
+# Opus Report - 2026-06-16 (Session 3)
+
+## Session Summary - Optimisation de la Personnalité et Sécurité
+
+Cette session s'est concentrée sur le réglage fin de l'identité de Poulga pour éviter la passivité et sur la validation des mécanismes de sécurité admin.
+
+## Key Implementations & Improvements
+
+### 1. Ajustement de la Passivité LLM
+*   **Température augmentée :** Passage de `0.4` à `0.6` dans `ollama.go` pour favoriser des réponses plus naturelles et engagées.
+*   **Prompt Système :** Validation des directives interdisant les excuses ("Désolée") et les introductions d'IA standard.
+
+### 2. Sécurité et Autorisations
+*   **Audit isAdmin :** Confirmation de la robustesse de la détection admin (gestion des JIDs `:n`, LIDs et nettoyage des numéros).
+*   **Contextualisation :** Vérification de l'injection dynamique du nom réel de l'utilisateur et de ses badges/rôles dans le prompt pour une reconnaissance immédiate.
+
+### 3. Stabilité Globale
+*   **Build Check :** Vérification de la compilation du module `brain` pour assurer qu'aucune régression n'a été introduite.

@@ -84,7 +84,7 @@ func loadBotJids() {
 }
 
 func main() {
-	fmt.Println("=== MorningStar Brain v2.1 starting ===")
+	fmt.Println("=== MorningStar Brain v2.2 [ALPHA POSTURE] starting ===")
 
 	// Initialize DB with retry
 	for {
@@ -214,20 +214,15 @@ func handleWebhook(c echo.Context) error {
 	if data.Key.FromMe {
 		botJid := data.Key.Participant
 		if botJid == "" {
-			// Fallback: learn from contextInfo if Me
-			if data.ContextInfo != nil && data.ContextInfo.Participant != "" {
-				// If fromMe is true, the participant in ContextInfo of the event
-				// might be the LID Evolution uses for us.
-				botJid = data.ContextInfo.Participant
-			}
+			botJid = data.Key.RemoteJid
+		}
+		// Fallback: learn from contextInfo if available
+		if data.ContextInfo != nil && data.ContextInfo.Participant != "" {
+			registerBotJid(data.ContextInfo.Participant)
 		}
 		
 		if botJid != "" {
 			registerBotJid(botJid)
-		} else {
-			if strings.HasSuffix(data.Key.RemoteJid, "@g.us") {
-				fmt.Printf("[DEBUG] LEARN_SKIPPED: fromMe=true but bot ID not found in group %s\n", data.Key.RemoteJid)
-			}
 		}
 		return c.NoContent(http.StatusOK)
 	}
@@ -624,13 +619,29 @@ func processLLMResponse(ctx MessageContext) {
 	// ======================================================================
 	// STEP 2: BUILD STRUCTURED MESSAGES
 	// ======================================================================
-	// Note: We use BuildChatPrompt for the BASE instruction, but we wrap it in api.Message
 	basePrompt := BuildChatPromptWithHumeur(ctx, history, userMem, nil, factsLegacy, summary, "", humeur)
 	
 	messages := []api.Message{
 		{Role: "system", Content: basePrompt},
-		{Role: "user", Content: ctx.Text},
 	}
+
+	// Add conversation history to messages
+	for _, h := range history {
+		role := "user"
+		content := h.Message
+		if h.IsFromBot {
+			role = "assistant"
+		} else {
+			senderName := GetMemberName(h.SenderJid, h.GroupJid, h.SenderName)
+			content = fmt.Sprintf("[%s]: %s", senderName, h.Message)
+		}
+		messages = append(messages, api.Message{Role: role, Content: content})
+	}
+
+	// Add current message
+	messages = append(messages, api.Message{Role: "user", Content: ctx.Text})
+	
+	fmt.Printf("[DEBUG] STARTING AGENT LOOP with %d messages\n", len(messages))
 
 	// ======================================================================
 	// STEP 3: NATIVE AGENT LOOP

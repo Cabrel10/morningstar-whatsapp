@@ -558,6 +558,20 @@ func recordStickerUsage(jid, sha256 string) error {
 // ============================================================================
 
 func upsertMember(jid, groupJid, pushName string) error {
+	jid = strings.ReplaceAll(jid, " ", "")
+	groupJid = strings.ReplaceAll(groupJid, " ", "")
+	
+	if pushName == "" {
+		_, err := db.Exec(context.Background(),
+			`INSERT INTO member_details (jid, group_jid, push_name, message_count, last_seen)
+			 VALUES ($1, $2, '', 1, CURRENT_TIMESTAMP)
+			 ON CONFLICT (jid, group_jid) DO UPDATE SET
+			 message_count = member_details.message_count + 1,
+			 last_seen = CURRENT_TIMESTAMP`,
+			jid, groupJid)
+		return err
+	}
+
 	_, err := db.Exec(context.Background(),
 		`INSERT INTO member_details (jid, group_jid, push_name, message_count, last_seen)
 		 VALUES ($1, $2, $3, 1, CURRENT_TIMESTAMP)
@@ -747,6 +761,10 @@ func SaveMemberName(jid, groupJid, name string) error {
 }
 
 func GetMemberName(jid, groupJid, fallbackName string) string {
+	jid = strings.ReplaceAll(jid, " ", "")
+	groupJid = strings.ReplaceAll(groupJid, " ", "")
+
+	// 1. Check for custom name in member_profiles
 	var customName string
 	err := db.QueryRow(context.Background(), `
 		SELECT custom_name FROM member_profiles
@@ -757,14 +775,31 @@ func GetMemberName(jid, groupJid, fallbackName string) string {
 		return customName
 	}
 
-	// If no custom name, use fallback (PushName)
+	// 2. Use the provided fallbackName (PushName from current message)
 	if fallbackName != "" {
 		return fallbackName
 	}
 
-	// Final fallback: return number without @... suffix
+	// 3. Check for push_name in member_details (saved from previous messages)
+	var pushName string
+	err = db.QueryRow(context.Background(), `
+		SELECT push_name FROM member_details
+		WHERE jid = $1 AND group_jid = $2
+	`, jid, groupJid).Scan(&pushName)
+	if err == nil && pushName != "" {
+		return pushName
+	}
+
+	// 4. Final fallback: return number without @... suffix
 	parts := strings.Split(jid, "@")
-	return parts[0]
+	if len(parts) > 0 {
+		num := parts[0]
+		if strings.Contains(num, ":") {
+			num = strings.Split(num, ":")[0]
+		}
+		return num
+	}
+	return jid
 }
 
 // ============================================================================

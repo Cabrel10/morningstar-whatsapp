@@ -93,7 +93,7 @@ func getOllamaOptions(intent Intent) map[string]interface{} {
 	base := map[string]interface{}{
 		"num_thread":     3,
 		"num_ctx":        4096,
-		"temperature":    0.4,
+		"temperature":    0.6,
 		"num_predict":    512,
 		"top_p":          0.9,
 		"repeat_penalty": 1.1,
@@ -136,6 +136,10 @@ func cleanResponse(text string) string {
 		"Bonjour ! Je suis Poulga",
 		"Je suis Poulga,",
 		"Bien sûr !",
+		"Je suis désolé,",
+		"Je suis désolée,",
+		"En tant qu'IA,",
+		"En tant qu'intelligence artificielle,",
 	}
 	for _, prefix := range unwantedPrefixes {
 		if strings.HasPrefix(text, prefix) {

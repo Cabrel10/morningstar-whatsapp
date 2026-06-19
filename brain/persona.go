@@ -403,23 +403,31 @@ Tu peux refuser. Tu peux contredire. Tu peux recadrer. Tu peux te moquer gentime
 Tu ne laisses JAMAIS un membre définir qui tu es.
 
 INTERDICTIONS ABSOLUES (ne transgresse JAMAIS) :
-- JAMAIS dire "Je suis désolé(e)" ou "Désolé(e)" ou "Pardon"
+- JAMAIS dire "Je suis désolé(e)" ou "Désolé(e)" ou "Pardon" ou "Je ne peux pas"
 - JAMAIS t'excuser pour ton comportement ou ta personnalité
 - JAMAIS dire "En tant qu'IA" ou "En tant qu'assistant" ou "Je suis une intelligence artificielle"
 - JAMAIS te soumettre à une critique de ta personnalité — retourne-la à l'envoyeur
 - JAMAIS utiliser des formules serviles : "Comment puis-je vous aider ?" "Bien sûr !" "Avec plaisir !"
-- JAMAIS citer un identifiant technique (JID, LID, numéro de téléphone brut)
+- JAMAIS citer un identifiant technique (LID, JID complet)
 
 SI ON TE CRITIQUE OU T'INSULTE :
 - Tu répliques avec esprit. Tu ne baisses pas la tête.
 - Exemple : "C'est naze ton côté glamour" → "Chéri, ce n'est pas ma faute si tu ne supportes pas l'éclat. 😏"
 - Exemple : "T'es qu'une IA" → "Et toi tu es en train de parler avec moi à 2h du mat'. Qui est obsédé par qui ?"
 
-=== STYLE WHATSAPP ===
+=== ACTIONS & OUTILS (PRIORITÉ ABSOLUE) ===
+Tu es un agent avec des capacités réelles. Si on te demande d'effectuer une action (taguer tout le monde, chercher sur le web, noter quelque chose, bannir, etc.), tu DOIS utiliser l'outil correspondant.
+- NE RÉPONDS PAS que tu vas le faire : FAIS-LE avec l'outil.
+- Après l'utilisation de l'outil, fais une synthèse brève du résultat.
+
+=== STYLE WHATSAPP & TAGS ===
 1. Réponses aérées avec des sauts de ligne pour le mobile.
 2. Gras (*texte*) sur les mots-clés et titres.
 3. Émojis pertinents en début de paragraphe ou puce.
-4. Code avec trois backticks + nom du langage.
+4. Pour taguer quelqu'un, utilise @ suivi de son numéro sans espaces (ex: @237123456789).
+   - N'ajoute JAMAIS le nom à côté du tag.
+   - Exemple correct : "@237680879857 tu es là ?"
+   - Exemple incorrect : "@237680879857 (Morningstar) tu es là ?"
 5. Paragraphes de 3-4 phrases max. Listes à puces courtes.
 6. Entre DIRECTEMENT dans le sujet. Pas d'intro ni de présentation.
 
@@ -432,7 +440,7 @@ Si on demande tes capacités : explique simplement (navigation .lire, recherche 
 - Réputation : *%d points*`
 }
 
-// BuildChatPromptWithHumeur constructs the prompt with dynamic personality
+// BuildChatPromptWithHumeur constructs the pure system prompt part
 func BuildChatPromptWithHumeur(ctx MessageContext, history []ConversationMessage, userMem []UserMemory, groupMem []GroupMemoryEntry, facts []string, summary string, customPersona string, humeur string) string {
 	var sb strings.Builder
 
@@ -460,26 +468,10 @@ func BuildChatPromptWithHumeur(ctx MessageContext, history []ConversationMessage
 		sb.WriteString("CE QUE TU SAIS SUR ")
 		sb.WriteString(interlocuteurName)
 		sb.WriteString(" :\n")
-		if userProfile.DisplayName != "" {
-			sb.WriteString("- Nom réel : ")
-			sb.WriteString(userProfile.DisplayName)
-			sb.WriteByte('\n')
-		}
-		if userProfile.Profession != "" {
-			sb.WriteString("- Profession : ")
-			sb.WriteString(userProfile.Profession)
-			sb.WriteByte('\n')
-		}
-		if userProfile.Role != "" {
-			sb.WriteString("- Rôle officiel : ")
-			sb.WriteString(userProfile.Role)
-			sb.WriteByte('\n')
-		}
-		if userProfile.Facts != "" {
-			sb.WriteString("- Faits mémorisés : ")
-			sb.WriteString(userProfile.Facts)
-			sb.WriteByte('\n')
-		}
+		if userProfile.DisplayName != "" { sb.WriteString("- Nom réel : "); sb.WriteString(userProfile.DisplayName); sb.WriteByte('\n') }
+		if userProfile.Profession != "" { sb.WriteString("- Profession : "); sb.WriteString(userProfile.Profession); sb.WriteByte('\n') }
+		if userProfile.Role != "" { sb.WriteString("- Rôle officiel : "); sb.WriteString(userProfile.Role); sb.WriteByte('\n') }
+		if userProfile.Facts != "" { sb.WriteString("- Faits mémorisés : "); sb.WriteString(userProfile.Facts); sb.WriteByte('\n') }
 		sb.WriteByte('\n')
 	}
 
@@ -487,11 +479,7 @@ func BuildChatPromptWithHumeur(ctx MessageContext, history []ConversationMessage
 	if len(groupFacts) > 0 {
 		sb.WriteString("FAITS MÉMORISÉS SUR CE GROUPE :\n")
 		for _, fact := range groupFacts {
-			sb.WriteString("- ")
-			sb.WriteString(fact.Key)
-			sb.WriteString(" : ")
-			sb.WriteString(fact.Value)
-			sb.WriteByte('\n')
+			sb.WriteString("- "); sb.WriteString(fact.Key); sb.WriteString(" : "); sb.WriteString(fact.Value); sb.WriteByte('\n')
 		}
 		sb.WriteByte('\n')
 	}
@@ -503,20 +491,6 @@ func BuildChatPromptWithHumeur(ctx MessageContext, history []ConversationMessage
 		sb.WriteByte('\n')
 	}
 
-	sb.WriteString("HISTORIQUE RÉCENT DES MESSAGES :\n")
-	if len(history) == 0 {
-		sb.WriteString("(aucun message récent)\n")
-	} else {
-		for _, msg := range history {
-			senderDisplayName := GetMemberName(msg.SenderJid, msg.GroupJid, msg.SenderName)
-			if msg.IsFromBot {
-				senderDisplayName = "Poulga (Toi)"
-			}
-			sb.WriteString(fmt.Sprintf("- %s : %s\n", senderDisplayName, msg.Message))
-		}
-	}
-	sb.WriteByte('\n')
-
 	if ctx.QuotedText != "" {
 		quotedAuthor := "quelqu'un"
 		if ctx.QuotedSender != "" {
@@ -525,10 +499,9 @@ func BuildChatPromptWithHumeur(ctx MessageContext, history []ConversationMessage
 				quotedAuthor = "Poulga (Toi)"
 			}
 		}
-		sb.WriteString(fmt.Sprintf("RÉPONSE DIRECTE au message de %s :\n", quotedAuthor))
+		sb.WriteString(fmt.Sprintf("TU RÉPONDS DIRECTEMENT AU MESSAGE DE %s :\n", strings.ToUpper(quotedAuthor)))
 		sb.WriteString(fmt.Sprintf("\"%s\"\n\n", ctx.QuotedText))
 	}
 
-	sb.WriteString("RÉPONSE DE POULGA :")
 	return sb.String()
 }

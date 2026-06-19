@@ -485,27 +485,16 @@ func handleCommand(ctx MessageContext, cmd, args string) {
 		for _, m := range memberMap {
 			mentions = append(mentions, m.Jid)
 			
-			// Use human name for display, but @number for WhatsApp mention rendering
+			// Strictly use @number format as requested
 			num := strings.Split(m.Jid, "@")[0]
-			displayName := m.DisplayName
-			// If displayName is just the raw number, try to make it cleaner
-			if displayName == num || displayName == "" {
-				displayName = num
-			}
-			
-			var entry string
-			if m.MessageCount > 0 {
-				entry = fmt.Sprintf("• @%s — *%s* (%d msgs)", num, displayName, m.MessageCount)
-			} else {
-				entry = fmt.Sprintf("• @%s — *%s*", num, displayName)
-			}
+			entry := fmt.Sprintf("@%s", num)
 			
 			if m.DaysSinceJoin > 30 {
-				veteranList = append(veteranList, "💎 "+entry)
+				veteranList = append(veteranList, entry)
 			} else if m.DaysSinceJoin > 7 {
-				activeList = append(activeList, "🛡️ "+entry)
+				activeList = append(activeList, entry)
 			} else {
-				newList = append(newList, "🆕 "+entry)
+				newList = append(newList, entry)
 			}
 		}
 
@@ -520,20 +509,17 @@ func handleCommand(ctx MessageContext, cmd, args string) {
 
 		if len(veteranList) > 0 {
 			sb.WriteString("🏆 *LES PILIERS*\n")
-			for _, v := range veteranList { sb.WriteString(v + "\n") }
-			sb.WriteString("\n")
+			sb.WriteString(strings.Join(veteranList, " ") + "\n\n")
 		}
 		
 		if len(activeList) > 0 {
 			sb.WriteString("🔥 *LES HABITUÉS*\n")
-			for _, a := range activeList { sb.WriteString(a + "\n") }
-			sb.WriteString("\n")
+			sb.WriteString(strings.Join(activeList, " ") + "\n\n")
 		}
 		
 		if len(newList) > 0 {
 			sb.WriteString("🌱 *LES NOUVEAUX*\n")
-			for _, n := range newList { sb.WriteString(n + "\n") }
-			sb.WriteString("\n")
+			sb.WriteString(strings.Join(newList, " ") + "\n\n")
 		}
 
 		sb.WriteString("━━━━━━━━━━━━━━━\n")
