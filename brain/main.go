@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -720,6 +721,20 @@ func processLLMResponse(ctx MessageContext) {
 	// ======================================================================
 	finalResponse = cleanResponse(finalResponse)
 	finalResponse, mentions := sanitizeJidsInText(finalResponse, ctx.RemoteJid)
+	// Convert friendly "@Prénom" tags written by the model into real mentions.
+	finalResponse, nameMentions := resolveNameMentions(finalResponse, ctx.RemoteJid)
+	if len(nameMentions) > 0 {
+		seen := make(map[string]bool)
+		for _, m := range mentions {
+			seen[m] = true
+		}
+		for _, m := range nameMentions {
+			if !seen[m] {
+				mentions = append(mentions, m)
+				seen[m] = true
+			}
+		}
+	}
 	
 	if finalResponse == "" || finalResponse == "..." {
 		finalResponse = "Je n'ai pas pu formuler une réponse claire. Peux-tu reformuler ?"
@@ -827,6 +842,140 @@ func handleWeeklySummary(c echo.Context) error {
 // ============================================================================
 // JID/LID SANITIZER — Replace technical identifiers with human names
 // ============================================================================
+
+// resolveNameMentions scans the LLM output for "@Prénom" tokens and converts them
+// into real WhatsApp mentions. WhatsApp requires the *number* in the text plus the
+// full JID in the "mentioned" array; the client then displays the contact's name.
+// So Poulga writes a friendly "@Morningstar" and we translate it to "@237..." + JID.
+//
+// Matching is case-insensitive and accent-insensitive on the first word of each
+// member's display name (custom name > push name). The longest matching name wins,
+// so "@Ken~v Sama" is preferred over "@Ken" when both exist.
+func resolveNameMentions(text string, groupJid string) (string, []string) {
+	if text == "" || !strings.Contains(text, "@") {
+		return text, nil
+	}
+
+	members, err := GetGroupMembersDetailed(groupJid)
+	if err != nil || len(members) == 0 {
+		return text, nil
+	}
+
+	// Build name -> JID map. Use the resolved display name (custom > push).
+	type cand struct {
+		norm string // normalised name (lowercase, no accents, no spaces)
+		jid  string
+		num  string
+	}
+	var cands []cand
+	seen := make(map[string]bool)
+	for _, m := range members {
+		display := GetMemberName(m.Jid, groupJid, m.PushName)
+		if display == "" {
+			continue
+		}
+		num := strings.Split(m.Jid, "@")[0]
+		if strings.Contains(num, ":") {
+			num = strings.Split(num, ":")[0]
+		}
+		// Full normalised name + first-token normalised name as fallbacks.
+		full := normalizeName(display)
+		first := normalizeName(strings.Fields(display)[0])
+		for _, key := range []string{full, first} {
+			if key == "" || seen[key+"|"+m.Jid] {
+				continue
+			}
+			seen[key+"|"+m.Jid] = true
+			cands = append(cands, cand{norm: key, jid: m.Jid, num: num})
+		}
+	}
+	// Longest name first so multi-word names match before their first token.
+	sort.Slice(cands, func(i, j int) bool { return len(cands[i].norm) > len(cands[j].norm) })
+
+	mentionsMap := make(map[string]bool)
+	// Match "@Word" or "@Word Word" (up to the candidate's token count).
+	atRegex := regexp.MustCompile(`@([\p{L}][\p{L}0-9 _~.'-]{0,40})`)
+	out := atRegex.ReplaceAllStringFunc(text, func(match string) string {
+		raw := strings.TrimPrefix(match, "@")
+		normCandidate := normalizeName(raw)
+		if normCandidate == "" {
+			return match
+		}
+		for _, c := range cands {
+			// Match if the candidate name is a prefix of what the model wrote
+			// (handles trailing punctuation/words after the name).
+			if strings.HasPrefix(normCandidate, c.norm) {
+				mentionsMap[c.jid] = true
+				// Replace only the matched name part with @number, keep any trailing text.
+				return "@" + c.num + strings.TrimPrefix(raw, raw[:matchedRuneLen(raw, c.norm)])
+			}
+		}
+		return match
+	})
+
+	var mentions []string
+	for jid := range mentionsMap {
+		mentions = append(mentions, jid)
+	}
+	if len(mentions) > 0 {
+		fmt.Printf("[DEBUG] resolveNameMentions: matched %d name tag(s): %v\n", len(mentions), mentions)
+	}
+	return out, mentions
+}
+
+// normalizeName lowercases, strips accents/diacritics and removes spaces &
+// common punctuation so "Ken~v Sama" and "kenv sama" compare equal.
+func normalizeName(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r >= 0xC0 && r <= 0x17F: // accented latin range -> fold to base letter
+			b.WriteRune(foldAccent(r))
+		}
+	}
+	return b.String()
+}
+
+// foldAccent maps common accented latin letters to their base ASCII letter.
+func foldAccent(r rune) rune {
+	switch {
+	case r >= 0xC0 && r <= 0xC5, r >= 0xE0 && r <= 0xE5:
+		return 'a'
+	case r == 0xC7 || r == 0xE7:
+		return 'c'
+	case r >= 0xC8 && r <= 0xCB, r >= 0xE8 && r <= 0xEB:
+		return 'e'
+	case r >= 0xCC && r <= 0xCF, r >= 0xEC && r <= 0xEF:
+		return 'i'
+	case r >= 0xD2 && r <= 0xD6, r >= 0xF2 && r <= 0xF6:
+		return 'o'
+	case r >= 0xD9 && r <= 0xDC, r >= 0xF9 && r <= 0xFC:
+		return 'u'
+	default:
+		return r
+	}
+}
+
+// matchedRuneLen returns how many runes of raw correspond to the normalised
+// prefix `norm`, so we can keep the trailing portion after the matched name.
+func matchedRuneLen(raw, norm string) int {
+	count := 0
+	matched := 0
+	for i, r := range raw {
+		nr := normalizeName(string(r))
+		if nr != "" {
+			matched += len(nr)
+		}
+		count = i + len(string(r))
+		if matched >= len(norm) {
+			break
+		}
+	}
+	return count
+}
 
 // sanitizeJidsInText replaces any residual JID/LID patterns in LLM output with human names and collects mentions
 func sanitizeJidsInText(text string, groupJid string) (string, []string) {
