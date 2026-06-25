@@ -603,9 +603,12 @@ func processLLMResponse(ctx MessageContext) {
 	// STEP 1: CONTEXT GATHERING
 	// ======================================================================
 	intent := DetectIntent(ctx.Text, ctx.IsMentioned, ctx.IsReplyToBot)
-	historyLimit := 10
-	if ctx.IsReplyToBot { historyLimit = 15 }
 
+	// Adaptive history: more context for ongoing conversations
+	historyLimit := 15
+	if ctx.IsReplyToBot {
+		historyLimit = 20
+	}
 	history, _ := GetConversationContext(ctx.RemoteJid, historyLimit)
 	userMem, _ := GetUserMemory(ctx.SenderJid, ctx.RemoteJid)
 	groupFacts, _ := GetGroupFacts(ctx.RemoteJid)
@@ -619,14 +622,30 @@ func processLLMResponse(ctx MessageContext) {
 
 	// ======================================================================
 	// STEP 2: BUILD STRUCTURED MESSAGES
+	//
+	// ARCHITECTURE (2026-06-25 fix):
+	//   Message[0] = system prompt (personality + user profile + group facts)
+	//   Message[1..N] = conversation history (proper role alternation)
+	//   Message[N+1] = current user message
+	//
+	// PREVIOUS BUG: The system prompt via BuildChatPromptWithHumeur()
+	// already contained the full conversation history as text, then
+	// the same history was ALSO added as separate messages. This doubled
+	// the history, wasting ~2000 tokens out of 4096 and drowning the
+	// personality instructions. Now the system prompt ONLY contains the
+	// personality + context (user profile, facts, summary), and history
+	// is ONLY provided as structured messages with proper roles.
 	// ======================================================================
-	basePrompt := BuildChatPromptWithHumeur(ctx, history, userMem, nil, factsLegacy, summary, "", humeur)
-	
+
+	// Build the system prompt WITHOUT history (personality + context only)
+	basePrompt := BuildChatPromptWithHumeur(ctx, nil, userMem, nil, factsLegacy, summary, "", humeur)
+
 	messages := []api.Message{
 		{Role: "system", Content: basePrompt},
 	}
 
-	// Add conversation history to messages
+	// Add conversation history as properly structured messages
+	// This gives the model real conversational context with correct roles
 	for _, h := range history {
 		role := "user"
 		content := h.Message
@@ -639,13 +658,29 @@ func processLLMResponse(ctx MessageContext) {
 		messages = append(messages, api.Message{Role: role, Content: content})
 	}
 
-	// Add current message
-	messages = append(messages, api.Message{Role: "user", Content: ctx.Text})
-	
-	fmt.Printf("[DEBUG] STARTING AGENT LOOP with %d messages\n", len(messages))
+	// Add the current user message with their name for identity
+	currentUserName := GetMemberName(ctx.SenderJid, ctx.RemoteJid, ctx.PushName)
+	currentMsg := fmt.Sprintf("[%s]: %s", currentUserName, ctx.Text)
+	if ctx.QuotedText != "" {
+		quotedAuthor := "quelqu\'un"
+		if ctx.QuotedSender != "" {
+			quotedAuthor = GetMemberName(ctx.QuotedSender, ctx.RemoteJid, strings.Split(ctx.QuotedSender, "@")[0])
+			if strings.Contains(ctx.QuotedSender, "237620864894") || isBotJid(ctx.QuotedSender) {
+				quotedAuthor = "Poulga (Toi)"
+			}
+		}
+		currentMsg = fmt.Sprintf("[%s] (en réponse à %s: \"%s\"): %s", currentUserName, quotedAuthor, ctx.QuotedText, ctx.Text)
+	}
+	messages = append(messages, api.Message{Role: "user", Content: currentMsg})
+
+	fmt.Printf("[DEBUG] AGENT LOOP: %d messages, intent=%s, model context budget well-managed\n", len(messages), intent)
 
 	// ======================================================================
 	// STEP 3: NATIVE AGENT LOOP
+	//
+	// The LLM can call tools (search, admin actions, etc.) for up to
+	// maxIterations. Each tool result is fed back as a "tool" message
+	// so the model can synthesize the final response.
 	// ======================================================================
 	maxIterations := 3
 	tools := GetOllamaTools()
@@ -659,69 +694,74 @@ func processLLMResponse(ctx MessageContext) {
 			break
 		}
 
-		// Add assistant's thought/response to history
+		// Add assistant's response to conversation
 		messages = append(messages, *resp)
 
 		if len(resp.ToolCalls) > 0 {
 			fmt.Printf("[AGENT] Iteration %d: %d tool calls\n", i+1, len(resp.ToolCalls))
-			
+
 			for _, call := range resp.ToolCalls {
-				fmt.Printf("[AGENT] Calling: %s\n", call.Function.Name)
-				
-				// Map api.ToolCall to our ToolCall struct for compatibility
-				tc := ToolCall{
-					Tool: call.Function.Name,
-				}
-				
-				// Handle different tool argument formats
+				fmt.Printf("[AGENT] Calling tool: %s with args: %v\n", call.Function.Name, call.Function.Arguments)
+
+				// GENERIC arg extraction via buildToolCallArgs (2026-06-25 fix)
+				// Previously: fragile per-tool if/else that missed many tools
 				argBytes, _ := json.Marshal(call.Function.Arguments)
 				var argsMap map[string]any
 				json.Unmarshal(argBytes, &argsMap)
 
-				if call.Function.Name == "google_search" {
-					if v, ok := argsMap["query"].(string); ok { tc.Args = v }
-				} else if call.Function.Name == "web_read" {
-					if v, ok := argsMap["url"].(string); ok { tc.Args = v }
-				} else if call.Function.Name == "add_note" {
-					if v, ok := argsMap["text"].(string); ok { tc.Args = v }
-				} else if call.Function.Name == "tagall" {
-					if v, ok := argsMap["message"].(string); ok { tc.Args = v }
-				} else if call.Function.Name == "poll" {
-					q, _ := argsMap["question"].(string)
-					o, _ := argsMap["options"].(string)
-					tc.Args = q + "|" + o
-				} else if call.Function.Name == "reminder" {
-					if v, ok := argsMap["text"].(string); ok { tc.Args = v }
+				tc := ToolCall{
+					Tool: call.Function.Name,
+					Args: buildToolCallArgs(call.Function.Name, argsMap),
 				}
 
 				result := ExecuteTool(tc, ctx)
-				
-				// Optimization: Truncate tool results
+
+				// Truncate oversized results to preserve context window
 				resText := result.Response
 				if len(resText) > 3000 {
 					resText = resText[:3000] + "\n\n[TRONQUÉ...]"
 				}
 
-				// Add tool result to history
+				// Feed tool result back to the model
 				messages = append(messages, api.Message{
 					Role:    "tool",
 					Content: resText,
 				})
 			}
-			// Continue to next iteration for synthesis
+			// Continue loop so model can synthesize after tool results
 		} else {
-			// No tools called, this is the final response
+			// No tools called — this is the final text response
 			finalResponse = resp.Content
+
+			// FALLBACK: If the model didn't use native tool calling but wrote
+			// a JSON tool call in its text, try to parse and execute it
+			if tc, found := ParseToolCall(finalResponse); found {
+				fmt.Printf("[AGENT] FALLBACK: Parsed text-based tool call: %s\n", tc.Tool)
+				result := ExecuteTool(tc, ctx)
+				if result.Success {
+					// Re-run with tool result
+					messages = append(messages, api.Message{
+						Role:    "tool",
+						Content: result.Response,
+					})
+					// One more iteration to synthesize
+					resp2, err2 := ChatWithOllama(messages, intent, nil)
+					if err2 == nil && resp2 != nil {
+						finalResponse = resp2.Content
+					}
+				}
+			}
 			break
 		}
 	}
 
 	// ======================================================================
-	// STEP 4: CLEAN + SANITIZE JIDs + SEND
+	// STEP 4: CLEAN + RESOLVE MENTIONS + SEND
 	// ======================================================================
 	finalResponse = cleanResponse(finalResponse)
 	finalResponse, mentions := sanitizeJidsInText(finalResponse, ctx.RemoteJid)
-	// Convert friendly "@Prénom" tags written by the model into real mentions.
+
+	// Convert friendly "@Prénom" tags written by the model into real mentions
 	finalResponse, nameMentions := resolveNameMentions(finalResponse, ctx.RemoteJid)
 	if len(nameMentions) > 0 {
 		seen := make(map[string]bool)
@@ -735,9 +775,9 @@ func processLLMResponse(ctx MessageContext) {
 			}
 		}
 	}
-	
+
 	if finalResponse == "" || finalResponse == "..." {
-		finalResponse = "Je n'ai pas pu formuler une réponse claire. Peux-tu reformuler ?"
+		finalResponse = "Je n\'ai pas pu formuler une réponse claire. Peux-tu reformuler ?"
 	}
 
 	elapsed := time.Since(start)
@@ -750,7 +790,7 @@ func processLLMResponse(ctx MessageContext) {
 	} else {
 		botMsgId, err = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, finalResponse, ctx.MsgId, ctx.SenderJid)
 	}
-	
+
 	if err == nil && botMsgId != "" {
 		go saveBotResponse(ctx, finalResponse, botMsgId)
 	}
