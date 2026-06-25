@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -602,9 +603,12 @@ func processLLMResponse(ctx MessageContext) {
 	// STEP 1: CONTEXT GATHERING
 	// ======================================================================
 	intent := DetectIntent(ctx.Text, ctx.IsMentioned, ctx.IsReplyToBot)
-	historyLimit := 10
-	if ctx.IsReplyToBot { historyLimit = 15 }
 
+	// Adaptive history: more context for ongoing conversations
+	historyLimit := 15
+	if ctx.IsReplyToBot {
+		historyLimit = 20
+	}
 	history, _ := GetConversationContext(ctx.RemoteJid, historyLimit)
 	userMem, _ := GetUserMemory(ctx.SenderJid, ctx.RemoteJid)
 	groupFacts, _ := GetGroupFacts(ctx.RemoteJid)
@@ -618,14 +622,30 @@ func processLLMResponse(ctx MessageContext) {
 
 	// ======================================================================
 	// STEP 2: BUILD STRUCTURED MESSAGES
+	//
+	// ARCHITECTURE (2026-06-25 fix):
+	//   Message[0] = system prompt (personality + user profile + group facts)
+	//   Message[1..N] = conversation history (proper role alternation)
+	//   Message[N+1] = current user message
+	//
+	// PREVIOUS BUG: The system prompt via BuildChatPromptWithHumeur()
+	// already contained the full conversation history as text, then
+	// the same history was ALSO added as separate messages. This doubled
+	// the history, wasting ~2000 tokens out of 4096 and drowning the
+	// personality instructions. Now the system prompt ONLY contains the
+	// personality + context (user profile, facts, summary), and history
+	// is ONLY provided as structured messages with proper roles.
 	// ======================================================================
-	basePrompt := BuildChatPromptWithHumeur(ctx, history, userMem, nil, factsLegacy, summary, "", humeur)
-	
+
+	// Build the system prompt WITHOUT history (personality + context only)
+	basePrompt := BuildChatPromptWithHumeur(ctx, nil, userMem, nil, factsLegacy, summary, "", humeur)
+
 	messages := []api.Message{
 		{Role: "system", Content: basePrompt},
 	}
 
-	// Add conversation history to messages
+	// Add conversation history as properly structured messages
+	// This gives the model real conversational context with correct roles
 	for _, h := range history {
 		role := "user"
 		content := h.Message
@@ -638,13 +658,29 @@ func processLLMResponse(ctx MessageContext) {
 		messages = append(messages, api.Message{Role: role, Content: content})
 	}
 
-	// Add current message
-	messages = append(messages, api.Message{Role: "user", Content: ctx.Text})
-	
-	fmt.Printf("[DEBUG] STARTING AGENT LOOP with %d messages\n", len(messages))
+	// Add the current user message with their name for identity
+	currentUserName := GetMemberName(ctx.SenderJid, ctx.RemoteJid, ctx.PushName)
+	currentMsg := fmt.Sprintf("[%s]: %s", currentUserName, ctx.Text)
+	if ctx.QuotedText != "" {
+		quotedAuthor := "quelqu\'un"
+		if ctx.QuotedSender != "" {
+			quotedAuthor = GetMemberName(ctx.QuotedSender, ctx.RemoteJid, strings.Split(ctx.QuotedSender, "@")[0])
+			if strings.Contains(ctx.QuotedSender, "237620864894") || isBotJid(ctx.QuotedSender) {
+				quotedAuthor = "Poulga (Toi)"
+			}
+		}
+		currentMsg = fmt.Sprintf("[%s] (en réponse à %s: \"%s\"): %s", currentUserName, quotedAuthor, ctx.QuotedText, ctx.Text)
+	}
+	messages = append(messages, api.Message{Role: "user", Content: currentMsg})
+
+	fmt.Printf("[DEBUG] AGENT LOOP: %d messages, intent=%s, model context budget well-managed\n", len(messages), intent)
 
 	// ======================================================================
 	// STEP 3: NATIVE AGENT LOOP
+	//
+	// The LLM can call tools (search, admin actions, etc.) for up to
+	// maxIterations. Each tool result is fed back as a "tool" message
+	// so the model can synthesize the final response.
 	// ======================================================================
 	maxIterations := 3
 	tools := GetOllamaTools()
@@ -658,71 +694,90 @@ func processLLMResponse(ctx MessageContext) {
 			break
 		}
 
-		// Add assistant's thought/response to history
+		// Add assistant's response to conversation
 		messages = append(messages, *resp)
 
 		if len(resp.ToolCalls) > 0 {
 			fmt.Printf("[AGENT] Iteration %d: %d tool calls\n", i+1, len(resp.ToolCalls))
-			
+
 			for _, call := range resp.ToolCalls {
-				fmt.Printf("[AGENT] Calling: %s\n", call.Function.Name)
-				
-				// Map api.ToolCall to our ToolCall struct for compatibility
-				tc := ToolCall{
-					Tool: call.Function.Name,
-				}
-				
-				// Handle different tool argument formats
+				fmt.Printf("[AGENT] Calling tool: %s with args: %v\n", call.Function.Name, call.Function.Arguments)
+
+				// GENERIC arg extraction via buildToolCallArgs (2026-06-25 fix)
+				// Previously: fragile per-tool if/else that missed many tools
 				argBytes, _ := json.Marshal(call.Function.Arguments)
 				var argsMap map[string]any
 				json.Unmarshal(argBytes, &argsMap)
 
-				if call.Function.Name == "google_search" {
-					if v, ok := argsMap["query"].(string); ok { tc.Args = v }
-				} else if call.Function.Name == "web_read" {
-					if v, ok := argsMap["url"].(string); ok { tc.Args = v }
-				} else if call.Function.Name == "add_note" {
-					if v, ok := argsMap["text"].(string); ok { tc.Args = v }
-				} else if call.Function.Name == "tagall" {
-					if v, ok := argsMap["message"].(string); ok { tc.Args = v }
-				} else if call.Function.Name == "poll" {
-					q, _ := argsMap["question"].(string)
-					o, _ := argsMap["options"].(string)
-					tc.Args = q + "|" + o
-				} else if call.Function.Name == "reminder" {
-					if v, ok := argsMap["text"].(string); ok { tc.Args = v }
+				tc := ToolCall{
+					Tool: call.Function.Name,
+					Args: buildToolCallArgs(call.Function.Name, argsMap),
 				}
 
 				result := ExecuteTool(tc, ctx)
-				
-				// Optimization: Truncate tool results
+
+				// Truncate oversized results to preserve context window
 				resText := result.Response
 				if len(resText) > 3000 {
 					resText = resText[:3000] + "\n\n[TRONQUÉ...]"
 				}
 
-				// Add tool result to history
+				// Feed tool result back to the model
 				messages = append(messages, api.Message{
 					Role:    "tool",
 					Content: resText,
 				})
 			}
-			// Continue to next iteration for synthesis
+			// Continue loop so model can synthesize after tool results
 		} else {
-			// No tools called, this is the final response
+			// No tools called — this is the final text response
 			finalResponse = resp.Content
+
+			// FALLBACK: If the model didn't use native tool calling but wrote
+			// a JSON tool call in its text, try to parse and execute it
+			if tc, found := ParseToolCall(finalResponse); found {
+				fmt.Printf("[AGENT] FALLBACK: Parsed text-based tool call: %s\n", tc.Tool)
+				result := ExecuteTool(tc, ctx)
+				if result.Success {
+					// Re-run with tool result
+					messages = append(messages, api.Message{
+						Role:    "tool",
+						Content: result.Response,
+					})
+					// One more iteration to synthesize
+					resp2, err2 := ChatWithOllama(messages, intent, nil)
+					if err2 == nil && resp2 != nil {
+						finalResponse = resp2.Content
+					}
+				}
+			}
 			break
 		}
 	}
 
 	// ======================================================================
-	// STEP 4: CLEAN + SANITIZE JIDs + SEND
+	// STEP 4: CLEAN + RESOLVE MENTIONS + SEND
 	// ======================================================================
 	finalResponse = cleanResponse(finalResponse)
 	finalResponse, mentions := sanitizeJidsInText(finalResponse, ctx.RemoteJid)
-	
+
+	// Convert friendly "@Prénom" tags written by the model into real mentions
+	finalResponse, nameMentions := resolveNameMentions(finalResponse, ctx.RemoteJid)
+	if len(nameMentions) > 0 {
+		seen := make(map[string]bool)
+		for _, m := range mentions {
+			seen[m] = true
+		}
+		for _, m := range nameMentions {
+			if !seen[m] {
+				mentions = append(mentions, m)
+				seen[m] = true
+			}
+		}
+	}
+
 	if finalResponse == "" || finalResponse == "..." {
-		finalResponse = "Je n'ai pas pu formuler une réponse claire. Peux-tu reformuler ?"
+		finalResponse = "Je n\'ai pas pu formuler une réponse claire. Peux-tu reformuler ?"
 	}
 
 	elapsed := time.Since(start)
@@ -735,7 +790,7 @@ func processLLMResponse(ctx MessageContext) {
 	} else {
 		botMsgId, err = sendWhatsAppMessage(ctx.Instance, ctx.RemoteJid, finalResponse, ctx.MsgId, ctx.SenderJid)
 	}
-	
+
 	if err == nil && botMsgId != "" {
 		go saveBotResponse(ctx, finalResponse, botMsgId)
 	}
@@ -827,6 +882,140 @@ func handleWeeklySummary(c echo.Context) error {
 // ============================================================================
 // JID/LID SANITIZER — Replace technical identifiers with human names
 // ============================================================================
+
+// resolveNameMentions scans the LLM output for "@Prénom" tokens and converts them
+// into real WhatsApp mentions. WhatsApp requires the *number* in the text plus the
+// full JID in the "mentioned" array; the client then displays the contact's name.
+// So Poulga writes a friendly "@Morningstar" and we translate it to "@237..." + JID.
+//
+// Matching is case-insensitive and accent-insensitive on the first word of each
+// member's display name (custom name > push name). The longest matching name wins,
+// so "@Ken~v Sama" is preferred over "@Ken" when both exist.
+func resolveNameMentions(text string, groupJid string) (string, []string) {
+	if text == "" || !strings.Contains(text, "@") {
+		return text, nil
+	}
+
+	members, err := GetGroupMembersDetailed(groupJid)
+	if err != nil || len(members) == 0 {
+		return text, nil
+	}
+
+	// Build name -> JID map. Use the resolved display name (custom > push).
+	type cand struct {
+		norm string // normalised name (lowercase, no accents, no spaces)
+		jid  string
+		num  string
+	}
+	var cands []cand
+	seen := make(map[string]bool)
+	for _, m := range members {
+		display := GetMemberName(m.Jid, groupJid, m.PushName)
+		if display == "" {
+			continue
+		}
+		num := strings.Split(m.Jid, "@")[0]
+		if strings.Contains(num, ":") {
+			num = strings.Split(num, ":")[0]
+		}
+		// Full normalised name + first-token normalised name as fallbacks.
+		full := normalizeName(display)
+		first := normalizeName(strings.Fields(display)[0])
+		for _, key := range []string{full, first} {
+			if key == "" || seen[key+"|"+m.Jid] {
+				continue
+			}
+			seen[key+"|"+m.Jid] = true
+			cands = append(cands, cand{norm: key, jid: m.Jid, num: num})
+		}
+	}
+	// Longest name first so multi-word names match before their first token.
+	sort.Slice(cands, func(i, j int) bool { return len(cands[i].norm) > len(cands[j].norm) })
+
+	mentionsMap := make(map[string]bool)
+	// Match "@Word" or "@Word Word" (up to the candidate's token count).
+	atRegex := regexp.MustCompile(`@([\p{L}][\p{L}0-9 _~.'-]{0,40})`)
+	out := atRegex.ReplaceAllStringFunc(text, func(match string) string {
+		raw := strings.TrimPrefix(match, "@")
+		normCandidate := normalizeName(raw)
+		if normCandidate == "" {
+			return match
+		}
+		for _, c := range cands {
+			// Match if the candidate name is a prefix of what the model wrote
+			// (handles trailing punctuation/words after the name).
+			if strings.HasPrefix(normCandidate, c.norm) {
+				mentionsMap[c.jid] = true
+				// Replace only the matched name part with @number, keep any trailing text.
+				return "@" + c.num + strings.TrimPrefix(raw, raw[:matchedRuneLen(raw, c.norm)])
+			}
+		}
+		return match
+	})
+
+	var mentions []string
+	for jid := range mentionsMap {
+		mentions = append(mentions, jid)
+	}
+	if len(mentions) > 0 {
+		fmt.Printf("[DEBUG] resolveNameMentions: matched %d name tag(s): %v\n", len(mentions), mentions)
+	}
+	return out, mentions
+}
+
+// normalizeName lowercases, strips accents/diacritics and removes spaces &
+// common punctuation so "Ken~v Sama" and "kenv sama" compare equal.
+func normalizeName(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r >= 0xC0 && r <= 0x17F: // accented latin range -> fold to base letter
+			b.WriteRune(foldAccent(r))
+		}
+	}
+	return b.String()
+}
+
+// foldAccent maps common accented latin letters to their base ASCII letter.
+func foldAccent(r rune) rune {
+	switch {
+	case r >= 0xC0 && r <= 0xC5, r >= 0xE0 && r <= 0xE5:
+		return 'a'
+	case r == 0xC7 || r == 0xE7:
+		return 'c'
+	case r >= 0xC8 && r <= 0xCB, r >= 0xE8 && r <= 0xEB:
+		return 'e'
+	case r >= 0xCC && r <= 0xCF, r >= 0xEC && r <= 0xEF:
+		return 'i'
+	case r >= 0xD2 && r <= 0xD6, r >= 0xF2 && r <= 0xF6:
+		return 'o'
+	case r >= 0xD9 && r <= 0xDC, r >= 0xF9 && r <= 0xFC:
+		return 'u'
+	default:
+		return r
+	}
+}
+
+// matchedRuneLen returns how many runes of raw correspond to the normalised
+// prefix `norm`, so we can keep the trailing portion after the matched name.
+func matchedRuneLen(raw, norm string) int {
+	count := 0
+	matched := 0
+	for i, r := range raw {
+		nr := normalizeName(string(r))
+		if nr != "" {
+			matched += len(nr)
+		}
+		count = i + len(string(r))
+		if matched >= len(norm) {
+			break
+		}
+	}
+	return count
+}
 
 // sanitizeJidsInText replaces any residual JID/LID patterns in LLM output with human names and collects mentions
 func sanitizeJidsInText(text string, groupJid string) (string, []string) {
